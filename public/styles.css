@@ -394,6 +394,28 @@ body {
   min-width: 78px;
 }
 
+.user-status-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.status-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  display: inline-block;
+  border: 1px solid #555;
+}
+
+.status-dot.is-online {
+  background: #2ea043;
+}
+
+.status-dot.is-offline {
+  background: #cf222e;
+}
+
 .app-modal {
   position: fixed;
   inset: 0;

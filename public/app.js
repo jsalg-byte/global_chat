@@ -510,12 +510,15 @@ function renderAdminUsernames(usernames) {
     const row = document.createElement('tr');
     const actionDisabled = !username.username_key ? 'disabled' : '';
     const hasIp = Boolean(username.last_ip);
+    const isOnline = Boolean(username.is_online);
+    const statusClass = isOnline ? 'is-online' : 'is-offline';
+    const statusLabel = isOnline ? 'Online' : 'Offline';
     const ipCell = hasIp
       ? `<button type=\"button\" class=\"admin-ip-link\" data-ip-username-key=\"${escapeHtml(username.username_key || '')}\" title=\"Open IP details\">${escapeHtml(truncateText(username.last_ip, 42))}</button>`
       : '-';
 
     row.innerHTML = `
-      <td>${escapeHtml(username.username_original || '-')}</td>
+      <td><span class=\"user-status-wrap\"><span class=\"status-dot ${statusClass}\" aria-hidden=\"true\"></span><span class=\"sr-only\">${statusLabel}</span>${escapeHtml(username.username_original || '-')}</span></td>
       <td>${escapeHtml(username.username_key || '-')}</td>
       <td>${escapeHtml(formatTime(username.claimed_at))}</td>
       <td>${username.has_session ? 'Yes' : 'No'}</td>

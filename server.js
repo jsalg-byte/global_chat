@@ -1166,6 +1166,13 @@ app.get('/api/admin/events', async (req, res, next) => {
   const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(1000, Math.floor(limitRaw))) : 250;
 
   try {
+    const onlineUsernameKeys = new Set();
+    for (const meta of wsClients.values()) {
+      if (meta?.usernameKey) {
+        onlineUsernameKeys.add(meta.usernameKey);
+      }
+    }
+
     const result = await pool.query(
       `
         SELECT
@@ -1323,7 +1330,8 @@ app.get('/api/admin/usernames', async (req, res, next) => {
       return {
         ...row,
         last_ip: lastIp,
-        last_country_code: getCountryCodeForIp(lastIp)
+        last_country_code: getCountryCodeForIp(lastIp),
+        is_online: onlineUsernameKeys.has(row.username_key)
       };
     });
 
