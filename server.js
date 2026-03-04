@@ -159,15 +159,49 @@ function presenceCutoffMs() {
   return Date.now() - PRESENCE_TTL_SECONDS * 1000;
 }
 
+async function ensurePresenceKeyIsZset(slug) {
+  const key = presenceKey(slug);
+  const currentType = await redisPublisher.type(key);
+  if (currentType !== 'none' && currentType !== 'zset') {
+    await redisPublisher.del(key);
+  }
+}
+
+async function normalizePresenceKeys(slugs) {
+  if (!slugs.length) {
+    return;
+  }
+
+  const typePipeline = redisPublisher.multi();
+  for (const slug of slugs) {
+    typePipeline.type(presenceKey(slug));
+  }
+  const types = await typePipeline.exec();
+
+  const toDelete = [];
+  for (let i = 0; i < slugs.length; i += 1) {
+    const keyType = String(types?.[i] || 'none');
+    if (keyType !== 'none' && keyType !== 'zset') {
+      toDelete.push(presenceKey(slugs[i]));
+    }
+  }
+
+  if (toDelete.length) {
+    await redisPublisher.del(toDelete);
+  }
+}
+
 async function refreshPresenceHeartbeat(channel, presenceMember) {
   if (!channel || !presenceMember) {
     return;
   }
 
+  await ensurePresenceKeyIsZset(channel);
   await redisPublisher.zAdd(presenceKey(channel), [{ score: Date.now(), value: presenceMember }]);
 }
 
 async function getPresenceCount(slug) {
+  await ensurePresenceKeyIsZset(slug);
   const cutoff = presenceCutoffMs();
   const results = await redisPublisher
     .multi()
@@ -692,6 +726,7 @@ async function getChannelCountsBySlug(slugs) {
     return {};
   }
 
+  await normalizePresenceKeys(slugs);
   const pipeline = redisPublisher.multi();
   const cutoff = presenceCutoffMs();
   for (const slug of slugs) {
