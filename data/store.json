@@ -1,0 +1,31 @@
+{
+  "usernameClaims": {
+    "mzootfb": {
+      "username": "mzootfb",
+      "token": "7d8ff5a642b3d81053d88be44e6a63aa78a4df2d16d4a69ca088b9d91294142b",
+      "claimedAt": "2026-03-04T00:12:36.798Z"
+    }
+  },
+  "tokens": {
+    "7d8ff5a642b3d81053d88be44e6a63aa78a4df2d16d4a69ca088b9d91294142b": "mzootfb"
+  },
+  "channels": {
+    "general": {
+      "slug": "general",
+      "name": "#general",
+      "description": "Default public channel",
+      "createdAt": "2026-03-04T00:00:00.000Z"
+    }
+  },
+  "messages": {
+    "general": [
+      {
+        "id": "01adcc90-fa7b-4a9e-9a0d-0900ce904cd5",
+        "channel": "general",
+        "username": "mzootfb",
+        "text": "hey you",
+        "timestamp": "2026-03-04T00:12:39.444Z"
+      }
+    ]
+  }
+}
