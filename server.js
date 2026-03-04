@@ -1,31 +1,47 @@
+require('dotenv').config();
+
 const crypto = require('crypto');
-const fs = require('fs/promises');
 const http = require('http');
 const path = require('path');
 const { URL } = require('url');
 
 const express = require('express');
+const { Pool } = require('pg');
+const { createClient } = require('redis');
 const { WebSocketServer } = require('ws');
 
 const PORT = Number(process.env.PORT || 3000);
-const DATA_DIR = path.join(__dirname, 'data');
-const DATA_FILE = path.join(DATA_DIR, 'store.json');
+const DATABASE_URL = process.env.DATABASE_URL;
+const REDIS_URL = process.env.REDIS_URL;
+const REDIS_PREFIX = process.env.REDIS_PREFIX || 'yungjewboii_global_chat';
+
+if (!DATABASE_URL) {
+  throw new Error('Missing DATABASE_URL environment variable.');
+}
+
+if (!REDIS_URL) {
+  throw new Error('Missing REDIS_URL environment variable.');
+}
+
 const USERNAME_REGEX = /^[A-Za-z0-9_]{3,24}$/;
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_DESCRIPTION_LENGTH = 120;
+
+const INSTANCE_ID = crypto.randomUUID();
+const EVENTS_CHANNEL = `${REDIS_PREFIX}:events`;
 
 const app = express();
 app.use(express.json({ limit: '16kb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-let db = {
-  usernameClaims: {},
-  tokens: {},
-  channels: {},
-  messages: {}
-};
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+});
 
-let persistQueue = Promise.resolve();
+const redisPublisher = createClient({ url: REDIS_URL });
+const redisSubscriber = createClient({ url: REDIS_URL });
+
 const wsClients = new Map();
 const subscribers = new Map();
 
@@ -42,6 +58,7 @@ function slugifyChannelName(input) {
   if (!cleaned || cleaned.length < 2 || cleaned.length > 32) {
     return null;
   }
+
   return cleaned;
 }
 
@@ -56,104 +73,37 @@ function nowIso() {
   return new Date().toISOString();
 }
 
-async function ensureDataStore() {
-  await fs.mkdir(DATA_DIR, { recursive: true });
-
-  try {
-    const raw = await fs.readFile(DATA_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    db = {
-      usernameClaims: parsed.usernameClaims || {},
-      tokens: parsed.tokens || {},
-      channels: parsed.channels || {},
-      messages: parsed.messages || {}
-    };
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      throw error;
-    }
+function getTokenFromRequest(req) {
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
+    return authHeader.slice(7).trim();
   }
 
-  if (!db.channels.general) {
-    db.channels.general = {
-      slug: 'general',
-      name: '#general',
-      description: 'Default public channel',
-      createdAt: nowIso()
-    };
+  const xToken = req.headers['x-session-token'];
+  if (typeof xToken === 'string' && xToken.trim()) {
+    return xToken.trim();
   }
 
-  if (!db.messages.general) {
-    db.messages.general = [];
-  }
-
-  await persist();
+  return null;
 }
 
-function persist() {
-  persistQueue = persistQueue.then(() => fs.writeFile(DATA_FILE, JSON.stringify(db, null, 2), 'utf8'));
-  return persistQueue;
+function parseWsPayload(raw) {
+  try {
+    const parsed = JSON.parse(String(raw));
+    if (parsed && typeof parsed === 'object') {
+      return parsed;
+    }
+  } catch (error) {
+    return null;
+  }
+
+  return null;
 }
 
 function sendJson(ws, payload) {
   if (ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(payload));
   }
-}
-
-function getTokenFromRequest(req) {
-  const authHeader = req.headers.authorization;
-  if (authHeader && authHeader.toLowerCase().startsWith('bearer ')) {
-    return authHeader.slice(7).trim();
-  }
-  const xToken = req.headers['x-session-token'];
-  if (typeof xToken === 'string' && xToken.trim()) {
-    return xToken.trim();
-  }
-  return null;
-}
-
-function getUsernameFromToken(token) {
-  if (!token) {
-    return null;
-  }
-
-  const key = db.tokens[token];
-  if (!key) {
-    return null;
-  }
-
-  const claim = db.usernameClaims[key];
-  if (!claim || claim.token !== token) {
-    return null;
-  }
-
-  return claim.username;
-}
-
-function requireAuth(req, res, next) {
-  const token = getTokenFromRequest(req);
-  const username = getUsernameFromToken(token);
-
-  if (!username) {
-    res.status(401).json({ error: 'unauthorized' });
-    return;
-  }
-
-  req.auth = { token, username, usernameKey: username.toLowerCase() };
-  next();
-}
-
-function getOnlineCount(slug) {
-  return subscribers.get(slug)?.size || 0;
-}
-
-function getChannelCounts() {
-  const counts = {};
-  for (const slug of Object.keys(db.channels)) {
-    counts[slug] = getOnlineCount(slug);
-  }
-  return counts;
 }
 
 function broadcastAll(payload) {
@@ -176,22 +126,122 @@ function broadcastChannel(slug, payload, exceptWs = null) {
   }
 }
 
-function broadcastCounts() {
-  broadcastAll({ type: 'channel_counts', counts: getChannelCounts() });
+function presenceKey(slug) {
+  return `${REDIS_PREFIX}:presence:${slug}`;
 }
 
-function emitPresence(slug, action, username) {
-  broadcastChannel(slug, {
+async function publishEvent(type, payload) {
+  await redisPublisher.publish(
+    EVENTS_CHANNEL,
+    JSON.stringify({
+      type,
+      origin: INSTANCE_ID,
+      payload
+    })
+  );
+}
+
+async function getSessionByToken(token) {
+  const result = await pool.query(
+    `
+      SELECT s.username_key, u.username_original AS username
+      FROM sessions s
+      INNER JOIN user_claims u ON u.username_key = s.username_key
+      WHERE s.token = $1
+      LIMIT 1
+    `,
+    [token]
+  );
+
+  return result.rows[0] || null;
+}
+
+async function requireAuth(req, res, next) {
+  try {
+    const token = getTokenFromRequest(req);
+    if (!token) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+
+    const session = await getSessionByToken(token);
+    if (!session) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+
+    req.auth = {
+      token,
+      username: session.username,
+      usernameKey: session.username_key
+    };
+
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+async function getChannelRows() {
+  const result = await pool.query(
+    `
+      SELECT slug, name, description, created_at
+      FROM channels
+      ORDER BY created_at ASC
+    `
+  );
+
+  return result.rows;
+}
+
+async function getChannelCountsBySlug(slugs) {
+  if (!slugs.length) {
+    return {};
+  }
+
+  const pipeline = redisPublisher.multi();
+  for (const slug of slugs) {
+    pipeline.sCard(presenceKey(slug));
+  }
+
+  const rawCounts = await pipeline.exec();
+  const counts = {};
+
+  for (let i = 0; i < slugs.length; i += 1) {
+    const value = rawCounts?.[i];
+    counts[slugs[i]] = Number(value || 0);
+  }
+
+  return counts;
+}
+
+async function broadcastCounts() {
+  const channels = await getChannelRows();
+  const slugs = channels.map((channel) => channel.slug);
+  const counts = await getChannelCountsBySlug(slugs);
+  const payload = { type: 'channel_counts', counts };
+
+  broadcastAll(payload);
+  await publishEvent('channel_counts', payload);
+}
+
+async function emitPresence(slug, action, username) {
+  const onlineCount = Number(await redisPublisher.sCard(presenceKey(slug)));
+
+  const payload = {
     type: 'presence',
     channel: slug,
     action,
     username,
-    onlineCount: getOnlineCount(slug),
+    onlineCount,
     timestamp: nowIso()
-  });
+  };
+
+  broadcastChannel(slug, payload);
+  await publishEvent('presence', payload);
 }
 
-function detachFromChannel(ws, reason = 'leave') {
+async function detachFromChannel(ws, reason = 'leave') {
   const meta = wsClients.get(ws);
   if (!meta || !meta.channel) {
     return;
@@ -206,12 +256,18 @@ function detachFromChannel(ws, reason = 'leave') {
     }
   }
 
+  if (meta.presenceMember) {
+    await redisPublisher.sRem(presenceKey(currentChannel), meta.presenceMember);
+  }
+
   meta.channel = null;
-  emitPresence(currentChannel, reason, meta.username);
-  broadcastCounts();
+  meta.presenceMember = null;
+
+  await emitPresence(currentChannel, reason, meta.username);
+  await broadcastCounts();
 }
 
-function attachToChannel(ws, slug) {
+async function attachToChannel(ws, slug) {
   const meta = wsClients.get(ws);
   if (!meta) {
     return;
@@ -222,7 +278,7 @@ function attachToChannel(ws, slug) {
   }
 
   if (meta.channel) {
-    detachFromChannel(ws, 'switch');
+    await detachFromChannel(ws, 'switch');
   }
 
   if (!subscribers.has(slug)) {
@@ -231,23 +287,53 @@ function attachToChannel(ws, slug) {
 
   subscribers.get(slug).add(ws);
   meta.channel = slug;
-  emitPresence(slug, 'join', meta.username);
-  broadcastCounts();
+  meta.presenceMember = `${INSTANCE_ID}:${meta.connectionId}`;
+
+  await redisPublisher.sAdd(presenceKey(slug), meta.presenceMember);
+
+  await emitPresence(slug, 'join', meta.username);
+  await broadcastCounts();
 }
 
-function parseWsPayload(raw) {
+async function handleRedisEvent(message) {
+  let event;
+
   try {
-    const parsed = JSON.parse(String(raw));
-    if (parsed && typeof parsed === 'object') {
-      return parsed;
-    }
+    event = JSON.parse(message);
   } catch (error) {
-    return null;
+    return;
   }
-  return null;
+
+  if (!event || event.origin === INSTANCE_ID || !event.type || !event.payload) {
+    return;
+  }
+
+  if (event.type === 'channel_counts') {
+    broadcastAll(event.payload);
+    return;
+  }
+
+  if (event.type === 'channel_created') {
+    broadcastAll(event.payload);
+    return;
+  }
+
+  if (event.type === 'presence') {
+    broadcastChannel(event.payload.channel, event.payload);
+    return;
+  }
+
+  if (event.type === 'typing') {
+    broadcastChannel(event.payload.channel, event.payload);
+    return;
+  }
+
+  if (event.type === 'message') {
+    broadcastChannel(event.payload.channel, event.payload);
+  }
 }
 
-app.post('/api/claim', async (req, res) => {
+app.post('/api/claim', async (req, res, next) => {
   const requested = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
 
   if (!USERNAME_REGEX.test(requested)) {
@@ -255,71 +341,105 @@ app.post('/api/claim', async (req, res) => {
     return;
   }
 
-  const key = requested.toLowerCase();
-  if (db.usernameClaims[key]) {
-    res.status(409).json({ error: 'username_taken', message: 'That username is taken.' });
-    return;
+  const usernameKey = requested.toLowerCase();
+  const token = crypto.randomBytes(32).toString('hex');
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const claimResult = await client.query(
+      `
+        INSERT INTO user_claims (username_key, username_original)
+        VALUES ($1, $2)
+        ON CONFLICT (username_key) DO NOTHING
+        RETURNING username_key
+      `,
+      [usernameKey, requested]
+    );
+
+    if (claimResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      res.status(409).json({ error: 'username_taken', message: 'That username is taken.' });
+      return;
+    }
+
+    await client.query(
+      `
+        INSERT INTO sessions (token, username_key)
+        VALUES ($1, $2)
+      `,
+      [token, usernameKey]
+    );
+
+    await client.query('COMMIT');
+
+    res.status(201).json({ token, username: requested });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    next(error);
+  } finally {
+    client.release();
   }
-
-  let token;
-  do {
-    token = crypto.randomBytes(32).toString('hex');
-  } while (db.tokens[token]);
-
-  db.usernameClaims[key] = {
-    username: requested,
-    token,
-    claimedAt: nowIso()
-  };
-  db.tokens[token] = key;
-
-  await persist();
-
-  res.status(201).json({ token, username: requested });
 });
 
 app.get('/api/session', requireAuth, (req, res) => {
   res.json({ username: req.auth.username });
 });
 
-app.post('/api/release', requireAuth, async (req, res) => {
-  const { token, usernameKey } = req.auth;
+app.post('/api/release', requireAuth, async (req, res, next) => {
+  const client = await pool.connect();
 
-  delete db.tokens[token];
-  delete db.usernameClaims[usernameKey];
+  try {
+    await client.query('BEGIN');
 
-  for (const [ws, meta] of wsClients.entries()) {
-    if (meta.token === token) {
-      sendJson(ws, { type: 'session_revoked' });
-      ws.close(4401, 'session revoked');
+    await client.query('DELETE FROM sessions WHERE username_key = $1', [req.auth.usernameKey]);
+    await client.query('DELETE FROM user_claims WHERE username_key = $1', [req.auth.usernameKey]);
+
+    await client.query('COMMIT');
+
+    for (const [ws, meta] of wsClients.entries()) {
+      if (meta.token === req.auth.token) {
+        sendJson(ws, { type: 'session_revoked' });
+        ws.close(4401, 'session revoked');
+      }
     }
+
+    res.json({ ok: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    next(error);
+  } finally {
+    client.release();
   }
-
-  await persist();
-
-  res.json({ ok: true });
 });
 
-app.get('/api/channels', requireAuth, (req, res) => {
-  const channels = Object.values(db.channels)
-    .map((channel) => ({
-      ...channel,
-      onlineCount: getOnlineCount(channel.slug)
-    }))
-    .sort((a, b) => b.onlineCount - a.onlineCount || a.slug.localeCompare(b.slug));
+app.get('/api/channels', requireAuth, async (req, res, next) => {
+  try {
+    const rows = await getChannelRows();
+    const slugs = rows.map((row) => row.slug);
+    const counts = await getChannelCountsBySlug(slugs);
 
-  res.json({ channels });
+    const channels = rows
+      .map((row) => ({
+        slug: row.slug,
+        name: row.name,
+        description: row.description,
+        createdAt: new Date(row.created_at).toISOString(),
+        onlineCount: counts[row.slug] || 0
+      }))
+      .sort((a, b) => b.onlineCount - a.onlineCount || a.slug.localeCompare(b.slug));
+
+    res.json({ channels });
+  } catch (error) {
+    next(error);
+  }
 });
 
-app.post('/api/channels', requireAuth, async (req, res) => {
+app.post('/api/channels', requireAuth, async (req, res, next) => {
   const slug = slugifyChannelName(req.body?.name || '');
   if (!slug) {
     res.status(400).json({ error: 'invalid_channel_name', message: 'Channel names must slugify to 2-32 chars.' });
-    return;
-  }
-
-  if (db.channels[slug]) {
-    res.status(409).json({ error: 'channel_exists', message: 'A channel with that name already exists.' });
     return;
   }
 
@@ -330,155 +450,306 @@ app.post('/api/channels', requireAuth, async (req, res) => {
     createdAt: nowIso()
   };
 
-  db.channels[slug] = channel;
-  db.messages[slug] = [];
-
-  await persist();
-
-  broadcastAll({
-    type: 'channel_created',
-    channel: { ...channel, onlineCount: 0 }
-  });
-  broadcastCounts();
-
-  res.status(201).json({ channel });
-});
-
-app.get('/api/channels/:slug/messages', requireAuth, (req, res) => {
-  const slug = String(req.params.slug || '').toLowerCase();
-
-  if (!db.channels[slug]) {
-    res.status(404).json({ error: 'not_found' });
+  try {
+    await pool.query(
+      `
+        INSERT INTO channels (slug, name, description, created_at)
+        VALUES ($1, $2, $3, $4)
+      `,
+      [channel.slug, channel.name, channel.description, channel.createdAt]
+    );
+  } catch (error) {
+    if (error.code === '23505') {
+      res.status(409).json({ error: 'channel_exists', message: 'A channel with that name already exists.' });
+      return;
+    }
+    next(error);
     return;
   }
 
-  const messages = db.messages[slug] || [];
-  res.json({ messages: messages.slice(-100) });
+  const payload = {
+    type: 'channel_created',
+    channel: {
+      ...channel,
+      onlineCount: 0
+    }
+  };
+
+  try {
+    broadcastAll(payload);
+    await publishEvent('channel_created', payload);
+    await broadcastCounts();
+    res.status(201).json({ channel });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/channels/:slug/messages', requireAuth, async (req, res, next) => {
+  const slug = String(req.params.slug || '').toLowerCase();
+
+  try {
+    const channelResult = await pool.query('SELECT slug FROM channels WHERE slug = $1 LIMIT 1', [slug]);
+    if (channelResult.rowCount === 0) {
+      res.status(404).json({ error: 'not_found' });
+      return;
+    }
+
+    const messagesResult = await pool.query(
+      `
+        SELECT id, channel_slug, username, text, created_at
+        FROM messages
+        WHERE channel_slug = $1
+        ORDER BY created_at DESC
+        LIMIT 100
+      `,
+      [slug]
+    );
+
+    const messages = messagesResult.rows
+      .map((row) => ({
+        id: row.id,
+        channel: row.channel_slug,
+        username: row.username,
+        text: row.text,
+        timestamp: new Date(row.created_at).toISOString()
+      }))
+      .reverse();
+
+    res.json({ messages });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
+app.use((error, req, res, next) => {
+  console.error(error);
+  res.status(500).json({ error: 'internal_error', message: 'Internal server error.' });
+});
+
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
-wss.on('connection', (ws, req) => {
+wss.on('connection', async (ws, req) => {
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const token = url.searchParams.get('token');
-  const username = getUsernameFromToken(token);
 
-  if (!username) {
+  if (!token) {
     sendJson(ws, { type: 'auth_error', message: 'Invalid session token.' });
     ws.close(4401, 'unauthorized');
     return;
   }
 
-  wsClients.set(ws, { token, username, channel: null });
+  const session = await getSessionByToken(token).catch(() => null);
+  if (!session) {
+    sendJson(ws, { type: 'auth_error', message: 'Invalid session token.' });
+    ws.close(4401, 'unauthorized');
+    return;
+  }
+
+  const meta = {
+    token,
+    username: session.username,
+    usernameKey: session.username_key,
+    channel: null,
+    connectionId: crypto.randomUUID(),
+    presenceMember: null
+  };
+
+  wsClients.set(ws, meta);
+
+  let counts = {};
+  try {
+    const channels = await getChannelRows();
+    counts = await getChannelCountsBySlug(channels.map((row) => row.slug));
+  } catch (error) {
+    counts = {};
+  }
 
   sendJson(ws, {
     type: 'connected',
-    username,
-    channelCounts: getChannelCounts()
+    username: session.username,
+    channelCounts: counts
   });
 
   ws.on('message', async (raw) => {
-    const payload = parseWsPayload(raw);
-    if (!payload || typeof payload.type !== 'string') {
-      sendJson(ws, { type: 'error', message: 'Invalid payload.' });
-      return;
-    }
-
-    const meta = wsClients.get(ws);
-    if (!meta) {
-      return;
-    }
-
-    if (payload.type === 'subscribe') {
-      const slug = String(payload.channel || '').toLowerCase();
-      if (!db.channels[slug]) {
-        sendJson(ws, { type: 'error', message: 'Channel not found.' });
+    try {
+      const payload = parseWsPayload(raw);
+      if (!payload || typeof payload.type !== 'string') {
+        sendJson(ws, { type: 'error', message: 'Invalid payload.' });
         return;
       }
 
-      attachToChannel(ws, slug);
-      sendJson(ws, {
-        type: 'subscribed',
-        channel: slug,
-        onlineCount: getOnlineCount(slug)
-      });
-      return;
-    }
-
-    if (payload.type === 'message') {
-      const channel = String(payload.channel || '').toLowerCase();
-      const text = typeof payload.text === 'string' ? payload.text.trim() : '';
-
-      if (!meta.channel || meta.channel !== channel || !db.channels[channel]) {
-        sendJson(ws, { type: 'error', message: 'Join the channel before sending messages.' });
+      const localMeta = wsClients.get(ws);
+      if (!localMeta) {
         return;
       }
 
-      if (!text) {
-        sendJson(ws, { type: 'error', message: 'Message cannot be empty.' });
+      if (payload.type === 'subscribe') {
+        const slug = String(payload.channel || '').toLowerCase();
+        const channelResult = await pool.query('SELECT slug FROM channels WHERE slug = $1 LIMIT 1', [slug]);
+
+        if (channelResult.rowCount === 0) {
+          sendJson(ws, { type: 'error', message: 'Channel not found.' });
+          return;
+        }
+
+        await attachToChannel(ws, slug);
+        const onlineCount = Number(await redisPublisher.sCard(presenceKey(slug)));
+
+        sendJson(ws, {
+          type: 'subscribed',
+          channel: slug,
+          onlineCount
+        });
         return;
       }
 
-      if (text.length > MAX_MESSAGE_LENGTH) {
-        sendJson(ws, { type: 'error', message: `Message exceeds ${MAX_MESSAGE_LENGTH} characters.` });
-        return;
-      }
+      if (payload.type === 'typing') {
+        const channel = String(payload.channel || '').toLowerCase();
+        if (!localMeta.channel || localMeta.channel !== channel) {
+          return;
+        }
 
-      const message = {
-        id: crypto.randomUUID(),
-        channel,
-        username: meta.username,
-        text,
-        timestamp: nowIso()
-      };
-
-      db.messages[channel].push(message);
-      await persist();
-
-      broadcastChannel(channel, { type: 'message', ...message });
-      return;
-    }
-
-    if (payload.type === 'typing') {
-      const channel = String(payload.channel || '').toLowerCase();
-      if (!meta.channel || meta.channel !== channel || !db.channels[channel]) {
-        return;
-      }
-
-      broadcastChannel(
-        channel,
-        {
+        const typingPayload = {
           type: 'typing',
           channel,
-          username: meta.username,
+          username: localMeta.username,
           timestamp: nowIso()
-        },
-        ws
-      );
-      return;
-    }
+        };
 
-    sendJson(ws, { type: 'error', message: `Unsupported type: ${payload.type}` });
+        broadcastChannel(channel, typingPayload, ws);
+        await publishEvent('typing', typingPayload);
+        return;
+      }
+
+      if (payload.type === 'message') {
+        const channel = String(payload.channel || '').toLowerCase();
+        const text = typeof payload.text === 'string' ? payload.text.trim() : '';
+
+        if (!localMeta.channel || localMeta.channel !== channel) {
+          sendJson(ws, { type: 'error', message: 'Join the channel before sending messages.' });
+          return;
+        }
+
+        if (!text) {
+          sendJson(ws, { type: 'error', message: 'Message cannot be empty.' });
+          return;
+        }
+
+        if (text.length > MAX_MESSAGE_LENGTH) {
+          sendJson(ws, { type: 'error', message: `Message exceeds ${MAX_MESSAGE_LENGTH} characters.` });
+          return;
+        }
+
+        const message = {
+          id: crypto.randomUUID(),
+          channel,
+          username: localMeta.username,
+          text,
+          timestamp: nowIso()
+        };
+
+        await pool.query(
+          `
+            INSERT INTO messages (id, channel_slug, username, text, created_at)
+            VALUES ($1, $2, $3, $4, $5)
+          `,
+          [message.id, message.channel, message.username, message.text, message.timestamp]
+        );
+
+        const messagePayload = { type: 'message', ...message };
+
+        broadcastChannel(channel, messagePayload);
+        await publishEvent('message', messagePayload);
+        return;
+      }
+
+      sendJson(ws, { type: 'error', message: `Unsupported type: ${payload.type}` });
+    } catch (error) {
+      console.error('WebSocket message handler error:', error);
+      sendJson(ws, { type: 'error', message: 'Message handling failed.' });
+    }
   });
 
   ws.on('close', () => {
-    detachFromChannel(ws, 'disconnect');
-    wsClients.delete(ws);
+    detachFromChannel(ws, 'disconnect')
+      .catch((error) => console.error('WebSocket close handler error:', error))
+      .finally(() => {
+        wsClients.delete(ws);
+      });
   });
 
   ws.on('error', () => {
-    detachFromChannel(ws, 'disconnect');
-    wsClients.delete(ws);
+    detachFromChannel(ws, 'disconnect')
+      .catch((error) => console.error('WebSocket error handler error:', error))
+      .finally(() => {
+        wsClients.delete(ws);
+      });
   });
 });
 
+async function initDatabase() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS user_claims (
+      username_key TEXT PRIMARY KEY,
+      username_original TEXT NOT NULL,
+      claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS sessions (
+      token TEXT PRIMARY KEY,
+      username_key TEXT NOT NULL UNIQUE REFERENCES user_claims(username_key) ON DELETE CASCADE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS channels (
+      slug TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT NOT NULL DEFAULT '',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS messages (
+      id UUID PRIMARY KEY,
+      channel_slug TEXT NOT NULL REFERENCES channels(slug) ON DELETE CASCADE,
+      username TEXT NOT NULL,
+      text TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_messages_channel_created_at
+    ON messages(channel_slug, created_at DESC);
+  `);
+
+  await pool.query(
+    `
+      INSERT INTO channels (slug, name, description)
+      VALUES ('general', '#general', 'Default public channel')
+      ON CONFLICT (slug) DO NOTHING
+    `
+  );
+}
+
 async function start() {
-  await ensureDataStore();
+  await redisPublisher.connect();
+  await redisSubscriber.connect();
+  await redisSubscriber.subscribe(EVENTS_CHANNEL, handleRedisEvent);
+
+  await initDatabase();
+
   server.listen(PORT, () => {
     console.log(`Realtime chat server running on http://localhost:${PORT}`);
   });

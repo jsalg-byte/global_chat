@@ -1,6 +1,16 @@
-# PulseRooms (PRD v1 Build)
+# yungjewboii global chat (Postgres + Redis)
 
 A real-time public community chat app based on your PRD.
+
+## Environment
+
+Copy `.env.example` values into your local `.env` or Coolify dashboard:
+
+- `PORT`
+- `DATABASE_URL`
+- `REDIS_URL`
+- `REDIS_PREFIX`
+- `NODE_ENV`
 
 ## Run
 
@@ -10,6 +20,12 @@ npm start
 ```
 
 Open: http://localhost:3000
+
+## Architecture
+
+- Postgres stores usernames, session tokens, channels, and durable messages.
+- Redis stores live presence sets and propagates real-time events across instances via pub/sub.
+- WebSocket fanout remains channel-based.
 
 ## Implemented v1 Scope
 
@@ -24,10 +40,4 @@ Open: http://localhost:3000
 - Presence updates and live online-count badges
 - Reconnect with exponential backoff (`1s -> 2s -> 4s -> ... -> 30s`)
 - Outbound message queue while disconnected
-- Message durability in `data/store.json`
 - Last 100 messages loaded on channel join
-
-## Notes
-
-- This implementation is single-node (no Redis pub/sub yet), which is fine for local/dev and small deployments.
-- Data is persisted locally in `data/store.json`.
