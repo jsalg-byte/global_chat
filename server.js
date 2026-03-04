@@ -709,6 +709,15 @@ async function requireAuth(req, res, next) {
   }
 }
 
+function requireAdminPassword(req, res) {
+  const providedPassword = String(req.headers['x-admin-password'] || '');
+  if (providedPassword !== ADMIN_DASHBOARD_PASSWORD) {
+    res.status(401).json({ error: 'unauthorized', message: 'Invalid admin password.' });
+    return false;
+  }
+  return true;
+}
+
 async function getChannelRows() {
   const result = await pool.query(
     `
@@ -844,6 +853,11 @@ async function handleRedisEvent(message) {
   }
 
   if (event.type === 'channel_created') {
+    broadcastAll(event.payload);
+    return;
+  }
+
+  if (event.type === 'channel_deleted') {
     broadcastAll(event.payload);
     return;
   }
@@ -1110,9 +1124,7 @@ app.get('/api/channels/:slug/messages', requireAuth, async (req, res, next) => {
 });
 
 app.get('/api/admin/events', async (req, res, next) => {
-  const providedPassword = String(req.headers['x-admin-password'] || '');
-  if (providedPassword !== ADMIN_DASHBOARD_PASSWORD) {
-    res.status(401).json({ error: 'unauthorized', message: 'Invalid admin password.' });
+  if (!requireAdminPassword(req, res)) {
     return;
   }
 
@@ -1160,10 +1172,318 @@ app.get('/api/admin/events', async (req, res, next) => {
   }
 });
 
+app.get('/api/admin/events/non-us', async (req, res, next) => {
+  if (!requireAdminPassword(req, res)) {
+    return;
+  }
+
+  const limitRaw = Number(req.query.limit || 250);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(1000, Math.floor(limitRaw))) : 250;
+  const queryLimit = Math.min(limit * 4, 5000);
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          id,
+          event_type,
+          event_time,
+          ip_address,
+          forwarded_for,
+          remote_address,
+          method,
+          path,
+          status_code,
+          duration_ms,
+          username,
+          username_key,
+          user_agent,
+          referer,
+          origin,
+          accept_language,
+          sec_ch_ua,
+          sec_ch_ua_mobile,
+          sec_ch_ua_platform,
+          token_fingerprint,
+          headers_json,
+          body_json,
+          meta_json,
+          instance_id
+        FROM site_events
+        ORDER BY event_time DESC
+        LIMIT $1
+      `,
+      [queryLimit]
+    );
+
+    const events = [];
+    for (const row of result.rows) {
+      const candidateIp =
+        normalizeIp(parseIpFromForwarded(row.forwarded_for)) ||
+        normalizeIp(row.ip_address) ||
+        normalizeIp(row.remote_address);
+      const countryCode = getCountryCodeForIp(candidateIp);
+
+      if (!countryCode || countryCode === 'US') {
+        continue;
+      }
+
+      events.push({
+        ...row,
+        country_code: countryCode
+      });
+
+      if (events.length >= limit) {
+        break;
+      }
+    }
+
+    res.json({ events });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/admin/usernames', async (req, res, next) => {
+  if (!requireAdminPassword(req, res)) {
+    return;
+  }
+
+  const limitRaw = Number(req.query.limit || 5000);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(10000, Math.floor(limitRaw))) : 5000;
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          u.username_key,
+          u.username_original,
+          u.claimed_at,
+          s.created_at AS session_created_at,
+          (s.token IS NOT NULL) AS has_session
+        FROM user_claims u
+        LEFT JOIN sessions s ON s.username_key = u.username_key
+        ORDER BY u.claimed_at ASC
+        LIMIT $1
+      `,
+      [limit]
+    );
+
+    res.json({ usernames: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/admin/channels', async (req, res, next) => {
+  if (!requireAdminPassword(req, res)) {
+    return;
+  }
+
+  const limitRaw = Number(req.query.limit || 2000);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(10000, Math.floor(limitRaw))) : 2000;
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          c.slug,
+          c.name,
+          c.description,
+          c.created_at,
+          COALESCE(m.message_count, 0)::int AS message_count
+        FROM channels c
+        LEFT JOIN (
+          SELECT channel_slug, COUNT(*)::int AS message_count
+          FROM messages
+          GROUP BY channel_slug
+        ) m ON m.channel_slug = c.slug
+        ORDER BY c.created_at ASC
+        LIMIT $1
+      `,
+      [limit]
+    );
+
+    const slugs = result.rows.map((row) => row.slug);
+    const onlineCounts = await getChannelCountsBySlug(slugs);
+
+    const channels = result.rows.map((row) => ({
+      ...row,
+      online_count: onlineCounts[row.slug] || 0
+    }));
+
+    res.json({ channels });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/usernames/release', async (req, res, next) => {
+  if (!requireAdminPassword(req, res)) {
+    return;
+  }
+
+  const usernameKeyInput = typeof req.body?.usernameKey === 'string' ? req.body.usernameKey.trim().toLowerCase() : '';
+  if (!USERNAME_REGEX.test(usernameKeyInput)) {
+    res.status(400).json({ error: 'invalid_username', message: 'Invalid username key.' });
+    return;
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const claimResult = await client.query(
+      `
+        SELECT username_key, username_original
+        FROM user_claims
+        WHERE username_key = $1
+        LIMIT 1
+        FOR UPDATE
+      `,
+      [usernameKeyInput]
+    );
+
+    if (claimResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'not_found', message: 'Username not found.' });
+      return;
+    }
+
+    const sessionResult = await client.query('SELECT token FROM sessions WHERE username_key = $1', [usernameKeyInput]);
+
+    await client.query('DELETE FROM sessions WHERE username_key = $1', [usernameKeyInput]);
+    await client.query('DELETE FROM user_claims WHERE username_key = $1', [usernameKeyInput]);
+
+    await client.query('COMMIT');
+
+    const releasedUsername = claimResult.rows[0].username_original;
+
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'admin_username_released',
+        meta: {
+          releasedByAdmin: true,
+          targetUsername: releasedUsername,
+          targetUsernameKey: usernameKeyInput,
+          revokedSessions: sessionResult.rowCount
+        }
+      })
+    );
+
+    for (const [ws, meta] of wsClients.entries()) {
+      if (meta.usernameKey === usernameKeyInput) {
+        sendJson(ws, { type: 'session_revoked' });
+        ws.close(4401, 'session revoked');
+      }
+    }
+
+    res.json({ ok: true, username: releasedUsername, usernameKey: usernameKeyInput });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    next(error);
+  } finally {
+    client.release();
+  }
+});
+
+app.post('/api/admin/channels/delete', async (req, res, next) => {
+  if (!requireAdminPassword(req, res)) {
+    return;
+  }
+
+  const slugInput = String(req.body?.slug || '')
+    .trim()
+    .toLowerCase();
+  if (!slugInput || slugifyChannelName(slugInput) !== slugInput) {
+    res.status(400).json({ error: 'invalid_channel', message: 'Invalid channel slug.' });
+    return;
+  }
+
+  const client = await pool.connect();
+  let transactionOpen = false;
+
+  try {
+    await client.query('BEGIN');
+    transactionOpen = true;
+
+    const deleteResult = await client.query(
+      `
+        DELETE FROM channels
+        WHERE slug = $1
+        RETURNING slug, name, description, created_at
+      `,
+      [slugInput]
+    );
+
+    if (deleteResult.rowCount === 0) {
+      await client.query('ROLLBACK');
+      transactionOpen = false;
+      res.status(404).json({ error: 'not_found', message: 'Channel not found.' });
+      return;
+    }
+
+    await client.query('COMMIT');
+    transactionOpen = false;
+
+    await redisPublisher.del(presenceKey(slugInput));
+
+    const affectedSockets = [];
+    for (const [ws, meta] of wsClients.entries()) {
+      if (meta.channel === slugInput) {
+        affectedSockets.push(ws);
+      }
+    }
+
+    for (const ws of affectedSockets) {
+      await detachFromChannel(ws, 'channel_deleted');
+      sendJson(ws, { type: 'channel_deleted', channel: { slug: slugInput } });
+    }
+
+    const deletedChannel = deleteResult.rows[0];
+    const payload = {
+      type: 'channel_deleted',
+      channel: {
+        slug: deletedChannel.slug,
+        name: deletedChannel.name,
+        description: deletedChannel.description,
+        createdAt: new Date(deletedChannel.created_at).toISOString()
+      }
+    };
+
+    broadcastAll(payload);
+    await publishEvent('channel_deleted', payload);
+    await broadcastCounts();
+
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'admin_channel_deleted',
+        meta: {
+          slug: deletedChannel.slug,
+          name: deletedChannel.name,
+          affectedConnections: affectedSockets.length
+        }
+      })
+    );
+
+    res.json({
+      ok: true,
+      channel: payload.channel,
+      affectedConnections: affectedSockets.length
+    });
+  } catch (error) {
+    if (transactionOpen) {
+      await client.query('ROLLBACK');
+    }
+    next(error);
+  } finally {
+    client.release();
+  }
+});
+
 app.post('/api/admin/unblock-me', async (req, res, next) => {
-  const providedPassword = String(req.headers['x-admin-password'] || '');
-  if (providedPassword !== ADMIN_DASHBOARD_PASSWORD) {
-    res.status(401).json({ error: 'unauthorized', message: 'Invalid admin password.' });
+  if (!requireAdminPassword(req, res)) {
     return;
   }
 

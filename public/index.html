@@ -176,22 +176,90 @@
             </form>
             <p id="admin-error" class="form-error" role="alert"></p>
 
-            <div id="admin-table-wrap" class="admin-table-wrap" hidden>
-              <table class="admin-table">
-                <thead>
-                  <tr>
-                    <th>Time</th>
-                    <th>Event</th>
-                    <th>User</th>
-                    <th>IP</th>
-                    <th>Route</th>
-                    <th>Status</th>
-                    <th>Device</th>
-                    <th>Details</th>
-                  </tr>
-                </thead>
-                <tbody id="admin-table-body"></tbody>
-              </table>
+            <div id="admin-tabs" class="admin-tabs" hidden>
+              <button type="button" class="admin-tab active" data-admin-tab="events">All Events</button>
+              <button type="button" class="admin-tab" data-admin-tab="usernames">Usernames</button>
+              <button type="button" class="admin-tab" data-admin-tab="non-us">Non-USA IP Events</button>
+              <button type="button" class="admin-tab" data-admin-tab="channels">Chatrooms</button>
+            </div>
+
+            <div id="admin-panels" class="admin-panels" hidden>
+              <div id="admin-panel-events" class="admin-panel">
+                <div class="admin-table-wrap">
+                  <table class="admin-table">
+                    <thead>
+                      <tr>
+                        <th>Time</th>
+                        <th>Event</th>
+                        <th>User</th>
+                        <th>IP</th>
+                        <th>Route</th>
+                        <th>Status</th>
+                        <th>Device</th>
+                        <th>Details</th>
+                      </tr>
+                    </thead>
+                    <tbody id="admin-events-body"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div id="admin-panel-usernames" class="admin-panel" hidden>
+                <div class="admin-table-wrap">
+                  <table class="admin-table">
+                    <thead>
+                      <tr>
+                        <th>Username</th>
+                        <th>Username Key</th>
+                        <th>Claimed At</th>
+                        <th>Has Session</th>
+                        <th>Session Created</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="admin-usernames-body"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div id="admin-panel-non-us" class="admin-panel" hidden>
+                <div class="admin-table-wrap">
+                  <table class="admin-table">
+                    <thead>
+                      <tr>
+                        <th>Time</th>
+                        <th>Country</th>
+                        <th>Event</th>
+                        <th>User</th>
+                        <th>IP</th>
+                        <th>Route</th>
+                        <th>Status</th>
+                        <th>Details</th>
+                      </tr>
+                    </thead>
+                    <tbody id="admin-non-us-body"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div id="admin-panel-channels" class="admin-panel" hidden>
+                <div class="admin-table-wrap">
+                  <table class="admin-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Slug</th>
+                        <th>Description</th>
+                        <th>Created At</th>
+                        <th>Online</th>
+                        <th>Messages</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="admin-channels-body"></tbody>
+                  </table>
+                </div>
+              </div>
             </div>
           </div>
         </div>

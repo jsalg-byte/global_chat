@@ -19,7 +19,8 @@ const state = {
   typingUsers: new Map(),
   lastTypingSentAt: 0,
   konamiIndex: 0,
-  adminPassword: ''
+  adminPassword: '',
+  adminActiveTab: 'events'
 };
 
 const elements = {
@@ -59,8 +60,17 @@ const elements = {
   adminRefresh: document.getElementById('admin-refresh'),
   adminUnblock: document.getElementById('admin-unblock'),
   adminError: document.getElementById('admin-error'),
-  adminTableWrap: document.getElementById('admin-table-wrap'),
-  adminTableBody: document.getElementById('admin-table-body')
+  adminTabs: document.getElementById('admin-tabs'),
+  adminTabButtons: document.querySelectorAll('[data-admin-tab]'),
+  adminPanels: document.getElementById('admin-panels'),
+  adminPanelEvents: document.getElementById('admin-panel-events'),
+  adminPanelUsernames: document.getElementById('admin-panel-usernames'),
+  adminPanelNonUs: document.getElementById('admin-panel-non-us'),
+  adminPanelChannels: document.getElementById('admin-panel-channels'),
+  adminEventsBody: document.getElementById('admin-events-body'),
+  adminUsernamesBody: document.getElementById('admin-usernames-body'),
+  adminNonUsBody: document.getElementById('admin-non-us-body'),
+  adminChannelsBody: document.getElementById('admin-channels-body')
 };
 
 function isMobileLikeInput() {
@@ -167,11 +177,12 @@ function openAdminDashboard() {
   showAdminError('');
 
   if (state.adminPassword) {
-    loadAdminEvents(state.adminPassword);
+    loadAdminDashboard(state.adminPassword);
     return;
   }
 
-  elements.adminTableWrap.hidden = true;
+  elements.adminTabs.hidden = true;
+  elements.adminPanels.hidden = true;
   elements.adminRefresh.hidden = true;
   elements.adminUnblock.hidden = true;
   elements.adminPasswordInput.focus();
@@ -212,13 +223,29 @@ function buildDetailsCell(event) {
   return `<details class=\"admin-details\"><summary>Inspect</summary><pre>${escapeHtml(JSON.stringify(details, null, 2))}</pre></details>`;
 }
 
+function setAdminTab(tabId) {
+  const nextTab = ['events', 'usernames', 'non-us', 'channels'].includes(tabId) ? tabId : 'events';
+  state.adminActiveTab = nextTab;
+
+  for (const button of elements.adminTabButtons) {
+    const isActive = button.dataset.adminTab === nextTab;
+    button.classList.toggle('active', isActive);
+    button.setAttribute('aria-selected', isActive ? 'true' : 'false');
+  }
+
+  elements.adminPanelEvents.hidden = nextTab !== 'events';
+  elements.adminPanelUsernames.hidden = nextTab !== 'usernames';
+  elements.adminPanelNonUs.hidden = nextTab !== 'non-us';
+  elements.adminPanelChannels.hidden = nextTab !== 'channels';
+}
+
 function renderAdminEvents(events) {
-  elements.adminTableBody.innerHTML = '';
+  elements.adminEventsBody.innerHTML = '';
 
   if (!events.length) {
     const row = document.createElement('tr');
     row.innerHTML = '<td class=\"admin-empty\" colspan=\"8\">No events yet.</td>';
-    elements.adminTableBody.appendChild(row);
+    elements.adminEventsBody.appendChild(row);
     return;
   }
 
@@ -241,11 +268,133 @@ function renderAdminEvents(events) {
       <td>${buildDetailsCell(event)}</td>
     `;
 
-    elements.adminTableBody.appendChild(row);
+    elements.adminEventsBody.appendChild(row);
   }
 }
 
-async function loadAdminEvents(password) {
+function renderAdminUsernames(usernames) {
+  elements.adminUsernamesBody.innerHTML = '';
+
+  if (!usernames.length) {
+    const row = document.createElement('tr');
+    row.innerHTML = '<td class=\"admin-empty\" colspan=\"6\">No active usernames.</td>';
+    elements.adminUsernamesBody.appendChild(row);
+    return;
+  }
+
+  for (const username of usernames) {
+    const row = document.createElement('tr');
+    const actionDisabled = !username.username_key ? 'disabled' : '';
+
+    row.innerHTML = `
+      <td>${escapeHtml(username.username_original || '-')}</td>
+      <td>${escapeHtml(username.username_key || '-')}</td>
+      <td>${escapeHtml(formatTime(username.claimed_at))}</td>
+      <td>${username.has_session ? 'Yes' : 'No'}</td>
+      <td>${username.session_created_at ? escapeHtml(formatTime(username.session_created_at)) : '-'}</td>
+      <td>
+        <button
+          type=\"button\"
+          class=\"admin-release-button\"
+          data-release-username-key=\"${escapeHtml(username.username_key || '')}\"
+          ${actionDisabled}
+        >
+          Release
+        </button>
+      </td>
+    `;
+
+    elements.adminUsernamesBody.appendChild(row);
+  }
+}
+
+function renderAdminNonUsEvents(events) {
+  elements.adminNonUsBody.innerHTML = '';
+
+  if (!events.length) {
+    const row = document.createElement('tr');
+    row.innerHTML = '<td class=\"admin-empty\" colspan=\"8\">No non-USA IP events.</td>';
+    elements.adminNonUsBody.appendChild(row);
+    return;
+  }
+
+  for (const event of events) {
+    const row = document.createElement('tr');
+    const route = [event.method, event.path].filter(Boolean).join(' ');
+    const ipText = event.ip_address || event.forwarded_for || event.remote_address || '-';
+    const userText = event.username || '-';
+    const status = event.status_code ?? '-';
+
+    row.innerHTML = `
+      <td>${escapeHtml(formatTime(event.event_time))}</td>
+      <td>${escapeHtml(event.country_code || '-')}</td>
+      <td>${escapeHtml(event.event_type || '-')}</td>
+      <td>${escapeHtml(userText)}</td>
+      <td title=\"${escapeHtml(ipText)}\">${escapeHtml(truncateText(ipText, 35))}</td>
+      <td title=\"${escapeHtml(route)}\">${escapeHtml(truncateText(route, 56))}</td>
+      <td>${escapeHtml(String(status))}</td>
+      <td>${buildDetailsCell(event)}</td>
+    `;
+
+    elements.adminNonUsBody.appendChild(row);
+  }
+}
+
+function renderAdminChannels(channels) {
+  elements.adminChannelsBody.innerHTML = '';
+
+  if (!channels.length) {
+    const row = document.createElement('tr');
+    row.innerHTML = '<td class=\"admin-empty\" colspan=\"7\">No chatrooms found.</td>';
+    elements.adminChannelsBody.appendChild(row);
+    return;
+  }
+
+  for (const channel of channels) {
+    const row = document.createElement('tr');
+    const description = channel.description || '-';
+    const messages = Number(channel.message_count || 0);
+    const online = Number(channel.online_count || 0);
+
+    row.innerHTML = `
+      <td>${escapeHtml(channel.name || '#unknown')}</td>
+      <td>${escapeHtml(channel.slug || '-')}</td>
+      <td title=\"${escapeHtml(description)}\">${escapeHtml(truncateText(description, 80))}</td>
+      <td>${escapeHtml(formatTime(channel.created_at))}</td>
+      <td>${escapeHtml(String(online))}</td>
+      <td>${escapeHtml(String(messages))}</td>
+      <td>
+        <button
+          type=\"button\"
+          class=\"admin-delete-channel-button\"
+          data-delete-channel-slug=\"${escapeHtml(channel.slug || '')}\"
+          ${channel.slug ? '' : 'disabled'}
+        >
+          Delete
+        </button>
+      </td>
+    `;
+
+    elements.adminChannelsBody.appendChild(row);
+  }
+}
+
+async function fetchAdminData(path, password) {
+  const response = await fetch(path, {
+    headers: {
+      'x-admin-password': password
+    }
+  });
+
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(payload.message || 'Unable to load dashboard.');
+  }
+
+  return payload;
+}
+
+async function loadAdminDashboard(password) {
   if (!password) {
     showAdminError('Password required.');
     return;
@@ -254,33 +403,111 @@ async function loadAdminEvents(password) {
   showAdminError('');
   elements.adminUnlock.disabled = true;
   elements.adminRefresh.disabled = true;
+  elements.adminUnblock.disabled = true;
 
   try {
-    const response = await fetch('/api/admin/events?limit=500', {
-      headers: {
-        'x-admin-password': password
-      }
-    });
-
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      throw new Error(payload.message || 'Unable to load dashboard.');
-    }
+    const [eventsPayload, usernamesPayload, nonUsPayload, channelsPayload] = await Promise.all([
+      fetchAdminData('/api/admin/events?limit=500', password),
+      fetchAdminData('/api/admin/usernames?limit=10000', password),
+      fetchAdminData('/api/admin/events/non-us?limit=500', password),
+      fetchAdminData('/api/admin/channels?limit=10000', password)
+    ]);
 
     state.adminPassword = password;
-    elements.adminTableWrap.hidden = false;
+    elements.adminTabs.hidden = false;
+    elements.adminPanels.hidden = false;
     elements.adminRefresh.hidden = false;
     elements.adminUnblock.hidden = false;
-    renderAdminEvents(payload.events || []);
+    renderAdminEvents(eventsPayload.events || []);
+    renderAdminUsernames(usernamesPayload.usernames || []);
+    renderAdminNonUsEvents(nonUsPayload.events || []);
+    renderAdminChannels(channelsPayload.channels || []);
+    setAdminTab(state.adminActiveTab);
   } catch (error) {
     state.adminPassword = '';
-    elements.adminTableWrap.hidden = true;
+    elements.adminTabs.hidden = true;
+    elements.adminPanels.hidden = true;
     elements.adminRefresh.hidden = true;
     elements.adminUnblock.hidden = true;
     showAdminError(error.message || 'Unable to load dashboard.');
   } finally {
     elements.adminUnlock.disabled = false;
     elements.adminRefresh.disabled = false;
+    elements.adminUnblock.disabled = false;
+  }
+}
+
+async function releaseAdminUsername(usernameKey) {
+  const password = state.adminPassword || elements.adminPasswordInput.value;
+  if (!password) {
+    showAdminError('Password required.');
+    return;
+  }
+
+  if (!usernameKey) {
+    showAdminError('Invalid username key.');
+    return;
+  }
+
+  showAdminError('');
+
+  try {
+    const response = await fetch('/api/admin/usernames/release', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-password': password
+      },
+      body: JSON.stringify({ usernameKey })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.message || 'Failed to release username.');
+    }
+
+    await loadAdminDashboard(password);
+  } catch (error) {
+    showAdminError(error.message || 'Failed to release username.');
+  }
+}
+
+async function deleteAdminChannel(channelSlug) {
+  const password = state.adminPassword || elements.adminPasswordInput.value;
+  if (!password) {
+    showAdminError('Password required.');
+    return;
+  }
+
+  if (!channelSlug) {
+    showAdminError('Invalid channel slug.');
+    return;
+  }
+
+  if (!confirm(`Delete #${channelSlug}? This removes the room and its messages permanently.`)) {
+    return;
+  }
+
+  showAdminError('');
+
+  try {
+    const response = await fetch('/api/admin/channels/delete', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-password': password
+      },
+      body: JSON.stringify({ slug: channelSlug })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.message || 'Failed to delete chatroom.');
+    }
+
+    await loadAdminDashboard(password);
+  } catch (error) {
+    showAdminError(error.message || 'Failed to delete chatroom.');
   }
 }
 
@@ -480,6 +707,41 @@ function applyMessage(msg) {
   }
 }
 
+function removeChannelLocally(channelSlug) {
+  if (!channelSlug) {
+    return;
+  }
+
+  const existing = state.channelMap.get(channelSlug);
+  if (!existing) {
+    return;
+  }
+
+  state.channels = state.channels.filter((channel) => channel.slug !== channelSlug);
+  state.channelMap.delete(channelSlug);
+  state.messagesByChannel.delete(channelSlug);
+  delete state.onlineCounts[channelSlug];
+
+  if (state.activeChannel === channelSlug) {
+    state.activeChannel = null;
+    state.typingUsers.clear();
+    renderTypingIndicator();
+
+    if (state.channels.length > 0) {
+      switchChannel(state.channels[0].slug).catch(() => {});
+    } else {
+      elements.messageList.innerHTML = '';
+      renderChannels();
+      renderActiveChannelHeader();
+      updateMessageComposerState();
+    }
+    return;
+  }
+
+  renderChannels();
+  renderActiveChannelHeader();
+}
+
 function connectWebSocket() {
   if (!state.token) {
     return;
@@ -539,6 +801,11 @@ function connectWebSocket() {
         state.onlineCounts[payload.channel.slug] = payload.channel.onlineCount || 0;
         renderChannels();
       }
+      return;
+    }
+
+    if (payload.type === 'channel_deleted' && payload.channel?.slug) {
+      removeChannelLocally(payload.channel.slug);
       return;
     }
 
@@ -636,6 +903,7 @@ async function switchChannel(channel) {
 
   queueOrSend({ type: 'subscribe', channel });
   elements.messageInput.focus();
+  updateMessageComposerState();
 }
 
 function updateMessageComposerState() {
@@ -646,7 +914,8 @@ function updateMessageComposerState() {
   elements.messageCount.classList.toggle('danger', tooLong);
 
   const empty = elements.messageInput.value.trim().length === 0;
-  elements.sendMessage.disabled = tooLong || empty;
+  const noActiveChannel = !state.activeChannel;
+  elements.sendMessage.disabled = tooLong || empty || noActiveChannel;
 }
 
 async function initSession() {
@@ -836,12 +1105,12 @@ elements.adminDashboard.addEventListener('click', (event) => {
 elements.adminPasswordForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   const password = elements.adminPasswordInput.value;
-  await loadAdminEvents(password);
+  await loadAdminDashboard(password);
 });
 
 elements.adminRefresh.addEventListener('click', async () => {
   const password = state.adminPassword || elements.adminPasswordInput.value;
-  await loadAdminEvents(password);
+  await loadAdminDashboard(password);
 });
 
 elements.adminUnblock.addEventListener('click', async () => {
@@ -866,9 +1135,49 @@ elements.adminUnblock.addEventListener('click', async () => {
       throw new Error(payload.message || 'Failed to unblock IP.');
     }
 
-    await loadAdminEvents(password);
+    await loadAdminDashboard(password);
   } catch (error) {
     showAdminError(error.message || 'Failed to unblock IP.');
+  }
+});
+
+elements.adminTabs.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-admin-tab]');
+  if (!button) {
+    return;
+  }
+  setAdminTab(button.dataset.adminTab);
+});
+
+elements.adminUsernamesBody.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-release-username-key]');
+  if (!button) {
+    return;
+  }
+  const usernameKey = button.getAttribute('data-release-username-key') || '';
+  button.disabled = true;
+  try {
+    await releaseAdminUsername(usernameKey);
+  } finally {
+    if (button.isConnected) {
+      button.disabled = false;
+    }
+  }
+});
+
+elements.adminChannelsBody.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-delete-channel-slug]');
+  if (!button) {
+    return;
+  }
+  const channelSlug = button.getAttribute('data-delete-channel-slug') || '';
+  button.disabled = true;
+  try {
+    await deleteAdminChannel(channelSlug);
+  } finally {
+    if (button.isConnected) {
+      button.disabled = false;
+    }
   }
 });
 
