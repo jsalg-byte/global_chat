@@ -311,6 +311,23 @@ function isSuspiciousPath(pathValue) {
   return patterns.some((pattern) => pathText.includes(pattern));
 }
 
+function getRequestPathname(pathValue) {
+  const rawPath = String(pathValue || '/');
+  try {
+    return new URL(rawPath, 'http://localhost').pathname.toLowerCase();
+  } catch (error) {
+    return rawPath.split('?')[0].toLowerCase();
+  }
+}
+
+function isImmediateEnvProbe(req) {
+  if (String(req.method || '').toUpperCase() !== 'GET') {
+    return false;
+  }
+  const pathname = getRequestPathname(req.originalUrl || req.url || req.path);
+  return pathname === '/.env';
+}
+
 function isSuspiciousUserAgent(userAgent) {
   const ua = String(userAgent || '').toLowerCase();
   if (!ua) {
@@ -609,6 +626,23 @@ app.use(async (req, res, next) => {
           }
         })
       );
+      res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
+      return;
+    }
+
+    if (isImmediateEnvProbe(req)) {
+      await blockIp(clientIp, HONEYPOT_BLOCK_SECONDS, 'env_probe');
+
+      queueSiteEvent(
+        buildHttpEvent(req, {
+          eventType: 'env_probe_blocked',
+          statusCode: 403,
+          meta: {
+            reason: 'GET /.env immediate block'
+          }
+        })
+      );
+
       res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
       return;
     }
