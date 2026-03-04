@@ -381,25 +381,90 @@ body {
   color: #666;
 }
 
-.admin-details {
-  margin: 0;
-}
-
-.admin-details pre {
-  margin: 4px 0 0;
-  max-height: 140px;
-  overflow: auto;
-  background: #f2f2f2;
-  border: 1px solid #d0d0d0;
-  padding: 6px;
-}
-
 .admin-release-button {
   min-width: 78px;
 }
 
 .admin-delete-channel-button {
   min-width: 78px;
+}
+
+.admin-inspect-button,
+.admin-ip-link {
+  min-width: 78px;
+}
+
+.app-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 12px;
+}
+
+.app-modal[hidden] {
+  display: none !important;
+}
+
+.app-modal-window {
+  width: min(1000px, 96vw);
+  height: min(80vh, 900px);
+  display: flex;
+  flex-direction: column;
+}
+
+.app-modal-content {
+  height: calc(100% - 28px);
+  overflow: auto;
+}
+
+.modal-section {
+  margin-bottom: 12px;
+}
+
+.modal-section:last-child {
+  margin-bottom: 0;
+}
+
+.modal-section h4 {
+  margin: 0 0 6px;
+}
+
+.modal-text {
+  margin: 0;
+}
+
+.modal-table-wrap {
+  overflow: auto;
+  border: 1px solid #b7b7b7;
+  background: #fff;
+}
+
+.modal-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+
+.modal-table th,
+.modal-table td {
+  border: 1px solid #d0d0d0;
+  padding: 4px 6px;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.modal-json {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: #f3f3f3;
+  border: 1px solid #d0d0d0;
+  padding: 8px;
 }
 
 .sr-only {
@@ -445,6 +510,11 @@ body {
   }
 
   .admin-window {
+    width: 100%;
+    height: min(88vh, 1100px);
+  }
+
+  .app-modal-window {
     width: 100%;
     height: min(88vh, 1100px);
   }

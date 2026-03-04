@@ -20,7 +20,9 @@ const state = {
   lastTypingSentAt: 0,
   konamiIndex: 0,
   adminPassword: '',
-  adminActiveTab: 'events'
+  adminActiveTab: 'events',
+  adminEvents: [],
+  adminNonUsEvents: []
 };
 
 const elements = {
@@ -28,6 +30,7 @@ const elements = {
   appScreen: document.getElementById('app-screen'),
   claimForm: document.getElementById('claim-form'),
   claimHoneypot: document.getElementById('claim-website'),
+  claimHelp: document.getElementById('claim-help'),
   claimUsername: document.getElementById('claim-username'),
   claimSubmit: document.getElementById('claim-submit'),
   claimError: document.getElementById('claim-error'),
@@ -70,7 +73,11 @@ const elements = {
   adminEventsBody: document.getElementById('admin-events-body'),
   adminUsernamesBody: document.getElementById('admin-usernames-body'),
   adminNonUsBody: document.getElementById('admin-non-us-body'),
-  adminChannelsBody: document.getElementById('admin-channels-body')
+  adminChannelsBody: document.getElementById('admin-channels-body'),
+  appModal: document.getElementById('app-modal'),
+  appModalTitle: document.getElementById('app-modal-title'),
+  appModalContent: document.getElementById('app-modal-content'),
+  appModalClose: document.getElementById('app-modal-close')
 };
 
 function isMobileLikeInput() {
@@ -164,6 +171,33 @@ function showAdminError(message) {
   elements.adminError.textContent = message || '';
 }
 
+function openAppModal(title, contentHtml) {
+  elements.appModalTitle.textContent = title || 'Details';
+  elements.appModalContent.innerHTML = contentHtml || '';
+  elements.appModal.hidden = false;
+  elements.appModal.setAttribute('aria-hidden', 'false');
+}
+
+function closeAppModal() {
+  elements.appModal.hidden = true;
+  elements.appModal.setAttribute('aria-hidden', 'true');
+  elements.appModalContent.innerHTML = '';
+}
+
+function formatMaybe(value, fallback = '-') {
+  if (value === null || value === undefined || value === '') {
+    return fallback;
+  }
+  return String(value);
+}
+
+function formatTimeOrDash(value) {
+  if (!value) {
+    return '-';
+  }
+  return formatTime(value);
+}
+
 function normalizeKonamiKey(key) {
   if (!key) {
     return '';
@@ -215,17 +249,200 @@ function truncateText(value, maxLength = 60) {
   return `${text.slice(0, maxLength)}...`;
 }
 
-function buildDetailsCell(event) {
-  const details = {
-    tokenFingerprint: event.token_fingerprint || null,
+function buildDetailsPayload(event) {
+  return {
+    eventType: event.event_type || null,
+    eventTime: event.event_time || null,
+    method: event.method || null,
+    path: event.path || null,
+    statusCode: event.status_code ?? null,
+    durationMs: event.duration_ms ?? null,
+    username: event.username || null,
+    usernameKey: event.username_key || null,
+    ipAddress: event.ip_address || null,
     forwardedFor: event.forwarded_for || null,
     remoteAddress: event.remote_address || null,
+    userAgent: event.user_agent || null,
+    referer: event.referer || null,
+    origin: event.origin || null,
+    acceptLanguage: event.accept_language || null,
+    secChUa: event.sec_ch_ua || null,
+    secChUaMobile: event.sec_ch_ua_mobile || null,
+    secChUaPlatform: event.sec_ch_ua_platform || null,
+    tokenFingerprint: event.token_fingerprint || null,
     headers: event.headers_json || null,
     body: event.body_json || null,
     meta: event.meta_json || null
   };
+}
 
-  return `<details class=\"admin-details\"><summary>Inspect</summary><pre>${escapeHtml(JSON.stringify(details, null, 2))}</pre></details>`;
+function buildInspectButton(source, index) {
+  return `<button type=\"button\" class=\"admin-inspect-button\" data-inspect-source=\"${escapeHtml(source)}\" data-inspect-index=\"${index}\">Inspect</button>`;
+}
+
+function openInspectModal(event) {
+  const details = buildDetailsPayload(event);
+  const route = [event.method, event.path].filter(Boolean).join(' ');
+  const summary = `
+    <div class="modal-section">
+      <p class="modal-text"><strong>Event:</strong> ${escapeHtml(formatMaybe(event.event_type))}</p>
+      <p class="modal-text"><strong>Time:</strong> ${escapeHtml(formatTime(event.event_time))}</p>
+      <p class="modal-text"><strong>User:</strong> ${escapeHtml(formatMaybe(event.username))}</p>
+      <p class="modal-text"><strong>IP:</strong> ${escapeHtml(formatMaybe(event.ip_address || event.forwarded_for || event.remote_address))}</p>
+      <p class="modal-text"><strong>Route:</strong> ${escapeHtml(formatMaybe(route))}</p>
+    </div>
+  `;
+  const body = `<pre class=\"modal-json\">${escapeHtml(JSON.stringify(details, null, 2))}</pre>`;
+  openAppModal('Event Inspect', `${summary}${body}`);
+}
+
+function openAboutModal() {
+  openAppModal(
+    'About This Site',
+    `
+      <div class="modal-section">
+        <p class="modal-text">Realtime public chat with simple username claims and live channels.</p>
+      </div>
+      <div class="modal-section">
+        <p class="modal-text">Built for fast conversation with lightweight moderation telemetry.</p>
+      </div>
+    `
+  );
+}
+
+async function fetchAdminIpDetails(usernameKey) {
+  const password = state.adminPassword || elements.adminPasswordInput.value;
+  if (!password) {
+    throw new Error('Password required.');
+  }
+
+  return fetchAdminData(`/api/admin/usernames/${encodeURIComponent(usernameKey)}/ip-details?recent=30&history=30`, password);
+}
+
+function buildIpDetailsModal(payload) {
+  const user = payload.user || {};
+  const location = payload.location || null;
+  const recentVisits = Array.isArray(payload.recent_visits) ? payload.recent_visits : [];
+  const ipHistory = Array.isArray(payload.ip_history) ? payload.ip_history : [];
+
+  const locationText = location
+    ? [
+        location.city,
+        location.region,
+        location.country_code
+      ]
+        .filter(Boolean)
+        .join(', ') || '-'
+    : '-';
+
+  const coords =
+    location && location.latitude !== null && location.longitude !== null
+      ? `${location.latitude}, ${location.longitude}`
+      : '-';
+
+  const recentRows = recentVisits.length
+    ? recentVisits
+        .map((visit) => {
+          const route = [visit.method, visit.path].filter(Boolean).join(' ');
+          return `
+            <tr>
+              <td>${escapeHtml(formatTime(visit.event_time))}</td>
+              <td>${escapeHtml(formatMaybe(visit.event_type))}</td>
+              <td>${escapeHtml(formatMaybe(route))}</td>
+              <td>${escapeHtml(formatMaybe(visit.status_code))}</td>
+              <td>${escapeHtml(formatMaybe(visit.ip_address))}</td>
+              <td>${escapeHtml(formatMaybe(visit.country_code))}</td>
+            </tr>
+          `;
+        })
+        .join('')
+    : '<tr><td class="admin-empty" colspan="6">No recent visits.</td></tr>';
+
+  const historyRows = ipHistory.length
+    ? ipHistory
+        .map((entry) => {
+          return `
+            <tr>
+              <td>${escapeHtml(formatMaybe(entry.ip_address))}</td>
+              <td>${escapeHtml(formatMaybe(entry.country_code))}</td>
+              <td>${escapeHtml(formatMaybe(entry.hit_count))}</td>
+              <td>${escapeHtml(formatTimeOrDash(entry.first_seen_at))}</td>
+              <td>${escapeHtml(formatTimeOrDash(entry.last_seen_at))}</td>
+            </tr>
+          `;
+        })
+        .join('')
+    : '<tr><td class="admin-empty" colspan="5">No IP history.</td></tr>';
+
+  return `
+    <div class="modal-section">
+      <p class="modal-text"><strong>Username:</strong> ${escapeHtml(formatMaybe(user.username_original))}</p>
+      <p class="modal-text"><strong>Username Key:</strong> ${escapeHtml(formatMaybe(user.username_key))}</p>
+      <p class="modal-text"><strong>Last IP:</strong> ${escapeHtml(formatMaybe(payload.last_ip))}</p>
+      <p class="modal-text"><strong>Last Seen:</strong> ${escapeHtml(formatTimeOrDash(payload.last_seen_at))}</p>
+    </div>
+
+    <div class="modal-section">
+      <h4>Location (Last IP)</h4>
+      <p class="modal-text"><strong>Place:</strong> ${escapeHtml(locationText)}</p>
+      <p class="modal-text"><strong>Timezone:</strong> ${escapeHtml(formatMaybe(location?.timezone))}</p>
+      <p class="modal-text"><strong>Coordinates:</strong> ${escapeHtml(coords)}</p>
+    </div>
+
+    <div class="modal-section">
+      <h4>Recent Visits</h4>
+      <div class="modal-table-wrap">
+        <table class="modal-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Event</th>
+              <th>Route</th>
+              <th>Status</th>
+              <th>IP</th>
+              <th>Country</th>
+            </tr>
+          </thead>
+          <tbody>${recentRows}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="modal-section">
+      <h4>IP History</h4>
+      <div class="modal-table-wrap">
+        <table class="modal-table">
+          <thead>
+            <tr>
+              <th>IP</th>
+              <th>Country</th>
+              <th>Visits</th>
+              <th>First Seen</th>
+              <th>Last Seen</th>
+            </tr>
+          </thead>
+          <tbody>${historyRows}</tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
+async function openUserIpDetailsModal(usernameKey) {
+  if (!usernameKey) {
+    showAdminError('Invalid username key.');
+    return;
+  }
+
+  try {
+    showAdminError('');
+    openAppModal('Loading IP Details...', '<p class="modal-text">Loading...</p>');
+    const payload = await fetchAdminIpDetails(usernameKey);
+    openAppModal(`IP Details: ${payload?.user?.username_original || usernameKey}`, buildIpDetailsModal(payload));
+  } catch (error) {
+    closeAppModal();
+    showAdminError(error.message || 'Unable to load IP details.');
+  }
 }
 
 function setAdminTab(tabId) {
@@ -245,16 +462,18 @@ function setAdminTab(tabId) {
 }
 
 function renderAdminEvents(events) {
+  state.adminEvents = Array.isArray(events) ? events : [];
   elements.adminEventsBody.innerHTML = '';
 
-  if (!events.length) {
+  if (!state.adminEvents.length) {
     const row = document.createElement('tr');
     row.innerHTML = '<td class=\"admin-empty\" colspan=\"8\">No events yet.</td>';
     elements.adminEventsBody.appendChild(row);
     return;
   }
 
-  for (const event of events) {
+  for (let index = 0; index < state.adminEvents.length; index += 1) {
+    const event = state.adminEvents[index];
     const row = document.createElement('tr');
     const route = [event.method, event.path].filter(Boolean).join(' ');
     const ipText = event.ip_address || event.forwarded_for || event.remote_address || '-';
@@ -270,7 +489,7 @@ function renderAdminEvents(events) {
       <td title=\"${escapeHtml(route)}\">${escapeHtml(truncateText(route, 56))}</td>
       <td>${escapeHtml(String(status))}</td>
       <td title=\"${escapeHtml(event.user_agent || '')}\">${escapeHtml(device)}</td>
-      <td>${buildDetailsCell(event)}</td>
+      <td>${buildInspectButton('events', index)}</td>
     `;
 
     elements.adminEventsBody.appendChild(row);
@@ -282,7 +501,7 @@ function renderAdminUsernames(usernames) {
 
   if (!usernames.length) {
     const row = document.createElement('tr');
-    row.innerHTML = '<td class=\"admin-empty\" colspan=\"6\">No active usernames.</td>';
+    row.innerHTML = '<td class=\"admin-empty\" colspan=\"7\">No active usernames.</td>';
     elements.adminUsernamesBody.appendChild(row);
     return;
   }
@@ -290,6 +509,10 @@ function renderAdminUsernames(usernames) {
   for (const username of usernames) {
     const row = document.createElement('tr');
     const actionDisabled = !username.username_key ? 'disabled' : '';
+    const hasIp = Boolean(username.last_ip);
+    const ipCell = hasIp
+      ? `<button type=\"button\" class=\"admin-ip-link\" data-ip-username-key=\"${escapeHtml(username.username_key || '')}\" title=\"Open IP details\">${escapeHtml(truncateText(username.last_ip, 42))}</button>`
+      : '-';
 
     row.innerHTML = `
       <td>${escapeHtml(username.username_original || '-')}</td>
@@ -297,6 +520,7 @@ function renderAdminUsernames(usernames) {
       <td>${escapeHtml(formatTime(username.claimed_at))}</td>
       <td>${username.has_session ? 'Yes' : 'No'}</td>
       <td>${username.session_created_at ? escapeHtml(formatTime(username.session_created_at)) : '-'}</td>
+      <td title=\"${escapeHtml(username.last_ip || '')}\">${ipCell}</td>
       <td>
         <button
           type=\"button\"
@@ -314,16 +538,18 @@ function renderAdminUsernames(usernames) {
 }
 
 function renderAdminNonUsEvents(events) {
+  state.adminNonUsEvents = Array.isArray(events) ? events : [];
   elements.adminNonUsBody.innerHTML = '';
 
-  if (!events.length) {
+  if (!state.adminNonUsEvents.length) {
     const row = document.createElement('tr');
     row.innerHTML = '<td class=\"admin-empty\" colspan=\"8\">No non-USA IP events.</td>';
     elements.adminNonUsBody.appendChild(row);
     return;
   }
 
-  for (const event of events) {
+  for (let index = 0; index < state.adminNonUsEvents.length; index += 1) {
+    const event = state.adminNonUsEvents[index];
     const row = document.createElement('tr');
     const route = [event.method, event.path].filter(Boolean).join(' ');
     const ipText = event.ip_address || event.forwarded_for || event.remote_address || '-';
@@ -338,7 +564,7 @@ function renderAdminNonUsEvents(events) {
       <td title=\"${escapeHtml(ipText)}\">${escapeHtml(truncateText(ipText, 35))}</td>
       <td title=\"${escapeHtml(route)}\">${escapeHtml(truncateText(route, 56))}</td>
       <td>${escapeHtml(String(status))}</td>
-      <td>${buildDetailsCell(event)}</td>
+      <td>${buildInspectButton('non-us', index)}</td>
     `;
 
     elements.adminNonUsBody.appendChild(row);
@@ -1084,6 +1310,10 @@ elements.newMessageNudge.addEventListener('click', () => {
   scrollMessagesToBottom();
 });
 
+elements.claimHelp.addEventListener('click', () => {
+  openAboutModal();
+});
+
 elements.messageList.addEventListener('scroll', () => {
   if (shouldAutoScroll()) {
     state.unreadInActive = 0;
@@ -1148,7 +1378,59 @@ elements.adminTabs.addEventListener('click', (event) => {
   setAdminTab(button.dataset.adminTab);
 });
 
+elements.adminEventsBody.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-inspect-source][data-inspect-index]');
+  if (!button) {
+    return;
+  }
+
+  const source = button.getAttribute('data-inspect-source') || '';
+  const index = Number(button.getAttribute('data-inspect-index'));
+  const collection = source === 'non-us' ? state.adminNonUsEvents : state.adminEvents;
+  const eventRow = Number.isFinite(index) ? collection[index] : null;
+
+  if (!eventRow) {
+    showAdminError('Unable to inspect event.');
+    return;
+  }
+
+  openInspectModal(eventRow);
+});
+
+elements.adminNonUsBody.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-inspect-source][data-inspect-index]');
+  if (!button) {
+    return;
+  }
+
+  const source = button.getAttribute('data-inspect-source') || '';
+  const index = Number(button.getAttribute('data-inspect-index'));
+  const collection = source === 'non-us' ? state.adminNonUsEvents : state.adminEvents;
+  const eventRow = Number.isFinite(index) ? collection[index] : null;
+
+  if (!eventRow) {
+    showAdminError('Unable to inspect event.');
+    return;
+  }
+
+  openInspectModal(eventRow);
+});
+
 elements.adminUsernamesBody.addEventListener('click', async (event) => {
+  const ipButton = event.target.closest('[data-ip-username-key]');
+  if (ipButton) {
+    const usernameKey = ipButton.getAttribute('data-ip-username-key') || '';
+    ipButton.disabled = true;
+    try {
+      await openUserIpDetailsModal(usernameKey);
+    } finally {
+      if (ipButton.isConnected) {
+        ipButton.disabled = false;
+      }
+    }
+    return;
+  }
+
   const button = event.target.closest('[data-release-username-key]');
   if (!button) {
     return;
@@ -1180,7 +1462,22 @@ elements.adminChannelsBody.addEventListener('click', async (event) => {
   }
 });
 
+elements.appModalClose.addEventListener('click', () => {
+  closeAppModal();
+});
+
+elements.appModal.addEventListener('click', (event) => {
+  if (event.target === elements.appModal) {
+    closeAppModal();
+  }
+});
+
 window.addEventListener('keydown', (event) => {
+  if (!elements.appModal.hidden && event.key === 'Escape') {
+    closeAppModal();
+    return;
+  }
+
   if (!elements.adminDashboard.hidden && event.key === 'Escape') {
     closeAdminDashboard();
     return;

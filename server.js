@@ -1294,16 +1294,180 @@ app.get('/api/admin/usernames', async (req, res, next) => {
           u.username_original,
           u.claimed_at,
           s.created_at AS session_created_at,
-          (s.token IS NOT NULL) AS has_session
+          (s.token IS NOT NULL) AS has_session,
+          latest_event.candidate_ip AS last_ip,
+          latest_event.event_time AS last_seen_at
         FROM user_claims u
         LEFT JOIN sessions s ON s.username_key = u.username_key
+        LEFT JOIN LATERAL (
+          SELECT
+            COALESCE(
+              NULLIF(BTRIM(e.ip_address), ''),
+              NULLIF(BTRIM(SPLIT_PART(e.forwarded_for, ',', 1)), ''),
+              NULLIF(BTRIM(e.remote_address), '')
+            ) AS candidate_ip,
+            e.event_time
+          FROM site_events e
+          WHERE e.username_key = u.username_key
+          ORDER BY e.event_time DESC
+          LIMIT 1
+        ) latest_event ON TRUE
         ORDER BY u.claimed_at ASC
         LIMIT $1
       `,
       [limit]
     );
 
-    res.json({ usernames: result.rows });
+    const usernames = result.rows.map((row) => {
+      const lastIp = normalizeIp(row.last_ip);
+      return {
+        ...row,
+        last_ip: lastIp,
+        last_country_code: getCountryCodeForIp(lastIp)
+      };
+    });
+
+    res.json({ usernames });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/admin/usernames/:usernameKey/ip-details', async (req, res, next) => {
+  if (!requireAdminPassword(req, res)) {
+    return;
+  }
+
+  const usernameKeyInput = typeof req.params.usernameKey === 'string' ? req.params.usernameKey.trim().toLowerCase() : '';
+  if (!USERNAME_REGEX.test(usernameKeyInput)) {
+    res.status(400).json({ error: 'invalid_username', message: 'Invalid username key.' });
+    return;
+  }
+
+  const recentRaw = Number(req.query.recent || 30);
+  const historyRaw = Number(req.query.history || 30);
+  const recentLimit = Number.isFinite(recentRaw) ? Math.max(1, Math.min(100, Math.floor(recentRaw))) : 30;
+  const historyLimit = Number.isFinite(historyRaw) ? Math.max(1, Math.min(200, Math.floor(historyRaw))) : 30;
+
+  try {
+    const userResult = await pool.query(
+      `
+        SELECT username_key, username_original, claimed_at
+        FROM user_claims
+        WHERE username_key = $1
+        LIMIT 1
+      `,
+      [usernameKeyInput]
+    );
+
+    if (userResult.rowCount === 0) {
+      res.status(404).json({ error: 'not_found', message: 'User not found.' });
+      return;
+    }
+
+    const recentVisitsResult = await pool.query(
+      `
+        SELECT
+          event_time,
+          event_type,
+          method,
+          path,
+          status_code,
+          duration_ms,
+          user_agent,
+          COALESCE(
+            NULLIF(BTRIM(ip_address), ''),
+            NULLIF(BTRIM(SPLIT_PART(forwarded_for, ',', 1)), ''),
+            NULLIF(BTRIM(remote_address), '')
+          ) AS candidate_ip
+        FROM site_events
+        WHERE username_key = $1
+        ORDER BY event_time DESC
+        LIMIT $2
+      `,
+      [usernameKeyInput, recentLimit]
+    );
+
+    const ipHistoryResult = await pool.query(
+      `
+        SELECT
+          candidate_ip,
+          COUNT(*)::int AS hit_count,
+          MIN(event_time) AS first_seen_at,
+          MAX(event_time) AS last_seen_at
+        FROM (
+          SELECT
+            event_time,
+            COALESCE(
+              NULLIF(BTRIM(ip_address), ''),
+              NULLIF(BTRIM(SPLIT_PART(forwarded_for, ',', 1)), ''),
+              NULLIF(BTRIM(remote_address), '')
+            ) AS candidate_ip
+          FROM site_events
+          WHERE username_key = $1
+        ) ip_events
+        WHERE candidate_ip IS NOT NULL
+        GROUP BY candidate_ip
+        ORDER BY last_seen_at DESC
+        LIMIT $2
+      `,
+      [usernameKeyInput, historyLimit]
+    );
+
+    const recentVisits = recentVisitsResult.rows.map((row) => {
+      const ipAddress = normalizeIp(row.candidate_ip);
+      return {
+        event_time: row.event_time,
+        event_type: row.event_type,
+        method: row.method,
+        path: row.path,
+        status_code: row.status_code,
+        duration_ms: row.duration_ms,
+        user_agent: row.user_agent,
+        ip_address: ipAddress,
+        country_code: getCountryCodeForIp(ipAddress)
+      };
+    });
+
+    const ipHistory = ipHistoryResult.rows.map((row) => {
+      const ipAddress = normalizeIp(row.candidate_ip);
+      return {
+        ip_address: ipAddress,
+        country_code: getCountryCodeForIp(ipAddress),
+        hit_count: Number(row.hit_count || 0),
+        first_seen_at: row.first_seen_at,
+        last_seen_at: row.last_seen_at
+      };
+    });
+
+    const latestVisitWithIp = recentVisits.find((visit) => visit.ip_address);
+    const lastIp = latestVisitWithIp?.ip_address || ipHistory[0]?.ip_address || null;
+    const lastSeenAt = latestVisitWithIp?.event_time || ipHistory[0]?.last_seen_at || null;
+
+    let location = null;
+    if (lastIp) {
+      const geo = geoip.lookup(lastIp);
+      if (geo) {
+        location = {
+          country_code: geo.country || null,
+          region: geo.region || null,
+          city: geo.city || null,
+          timezone: geo.timezone || null,
+          latitude: Array.isArray(geo.ll) ? geo.ll[0] : null,
+          longitude: Array.isArray(geo.ll) ? geo.ll[1] : null,
+          metro: geo.metro ?? null
+        };
+      }
+    }
+
+    res.json({
+      user: userResult.rows[0],
+      last_ip: lastIp,
+      last_seen_at: lastSeenAt,
+      location,
+      recent_visits: recentVisits,
+      ip_history: ipHistory
+    });
   } catch (error) {
     next(error);
   }
@@ -1913,6 +2077,11 @@ async function initDatabase() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_site_events_event_type
     ON site_events(event_type);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_site_events_username_key_time
+    ON site_events(username_key, event_time DESC);
   `);
 
   await pool.query(

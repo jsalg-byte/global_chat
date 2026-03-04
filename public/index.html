@@ -17,7 +17,7 @@
           <div class="title-bar">
             <div class="title-bar-text" id="claim-title">yungjewboii global chat - Claim Username</div>
             <div class="title-bar-controls">
-              <button aria-label="Help" type="button"></button>
+              <button id="claim-help" aria-label="Help" type="button"></button>
               <button aria-label="Close" type="button" disabled></button>
             </div>
           </div>
@@ -214,6 +214,7 @@
                         <th>Claimed At</th>
                         <th>Has Session</th>
                         <th>Session Created</th>
+                        <th>IP</th>
                         <th>Action</th>
                       </tr>
                     </thead>
@@ -262,6 +263,18 @@
               </div>
             </div>
           </div>
+        </div>
+      </section>
+
+      <section id="app-modal" class="app-modal" hidden aria-hidden="true">
+        <div class="window app-modal-window" role="dialog" aria-modal="true" aria-labelledby="app-modal-title">
+          <div class="title-bar">
+            <div class="title-bar-text" id="app-modal-title">Details</div>
+            <div class="title-bar-controls">
+              <button id="app-modal-close" aria-label="Close" type="button"></button>
+            </div>
+          </div>
+          <div id="app-modal-content" class="window-body app-modal-content"></div>
         </div>
       </section>
 
