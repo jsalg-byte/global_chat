@@ -50,6 +50,11 @@ if (!REDIS_URL) {
 const USERNAME_REGEX = /^[A-Za-z0-9_]{3,24}$/;
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_DESCRIPTION_LENGTH = 120;
+const USER_COLOR_PALETTE = [
+  '#000000', '#7f7f7f', '#880015', '#ed1c24', '#ff7f27', '#fff200', '#22b14c', '#00a2e8', '#3f48cc', '#a349a4',
+  '#ffffff', '#c3c3c3', '#b97a57', '#ffaec9', '#ffc90e', '#efe4b0', '#b5e61d', '#99d9ea', '#7092be', '#c8bfe7',
+  '#f8f8f8', '#d9d2e9', '#cfe2f3', '#d9ead3', '#fff2cc', '#fce5cd', '#f4cccc', '#ead1dc'
+];
 
 const INSTANCE_ID = crypto.randomUUID();
 const EVENTS_CHANNEL = `${REDIS_PREFIX}:events`;
@@ -116,6 +121,22 @@ function sanitizeDescription(value) {
     return '';
   }
   return value.trim().slice(0, MAX_DESCRIPTION_LENGTH);
+}
+
+function normalizeHexColor(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const text = value.trim();
+  const match = text.match(/^#([0-9a-fA-F]{6})$/);
+  if (!match) {
+    return null;
+  }
+  return `#${match[1].toLowerCase()}`;
+}
+
+function getRandomPaletteColor() {
+  return USER_COLOR_PALETTE[crypto.randomInt(0, USER_COLOR_PALETTE.length)];
 }
 
 function nowIso() {
@@ -594,6 +615,21 @@ async function initIpIntelligenceProviders() {
   }
 }
 
+async function ensureUserColors() {
+  const result = await pool.query(
+    `
+      SELECT username_key
+      FROM user_claims
+      WHERE color_hex IS NULL OR color_hex !~ '^#[0-9a-fA-F]{6}$'
+    `
+  );
+
+  for (const row of result.rows) {
+    const color = getRandomPaletteColor();
+    await pool.query('UPDATE user_claims SET color_hex = $2 WHERE username_key = $1', [row.username_key, color]);
+  }
+}
+
 async function consumeRateLimit(bucket, identifier, windowSec, maxRequests) {
   const key = rateLimitKey(bucket, identifier);
   const results = await redisPublisher
@@ -948,7 +984,7 @@ async function publishEvent(type, payload) {
 async function getSessionByToken(token) {
   const result = await pool.query(
     `
-      SELECT s.username_key, u.username_original AS username
+      SELECT s.username_key, u.username_original AS username, u.color_hex
       FROM sessions s
       INNER JOIN user_claims u ON u.username_key = s.username_key
       WHERE s.token = $1
@@ -977,7 +1013,8 @@ async function requireAuth(req, res, next) {
     req.auth = {
       token,
       username: session.username,
-      usernameKey: session.username_key
+      usernameKey: session.username_key,
+      userColor: normalizeHexColor(session.color_hex) || '#f8f8f8'
     };
 
     next();
@@ -1189,6 +1226,7 @@ app.post('/api/claim', async (req, res, next) => {
   }
 
   const usernameKey = requested.toLowerCase();
+  const selectedColor = normalizeHexColor(req.body?.color) || getRandomPaletteColor();
   const token = crypto.randomBytes(32).toString('hex');
   const client = await pool.connect();
 
@@ -1197,12 +1235,12 @@ app.post('/api/claim', async (req, res, next) => {
 
     const claimResult = await client.query(
       `
-        INSERT INTO user_claims (username_key, username_original)
-        VALUES ($1, $2)
+        INSERT INTO user_claims (username_key, username_original, color_hex)
+        VALUES ($1, $2, $3)
         ON CONFLICT (username_key) DO NOTHING
         RETURNING username_key
       `,
-      [usernameKey, requested]
+      [usernameKey, requested, selectedColor]
     );
 
     if (claimResult.rowCount === 0) {
@@ -1232,7 +1270,7 @@ app.post('/api/claim', async (req, res, next) => {
       })
     );
 
-    res.status(201).json({ token, username: requested });
+    res.status(201).json({ token, username: requested, color: selectedColor });
   } catch (error) {
     await client.query('ROLLBACK');
     next(error);
@@ -1253,7 +1291,47 @@ app.get('/api/session', requireAuth, (req, res) => {
     })
   );
 
-  res.json({ username: req.auth.username });
+  res.json({ username: req.auth.username, color: req.auth.userColor, palette: USER_COLOR_PALETTE });
+});
+
+app.post('/api/profile/color', requireAuth, async (req, res, next) => {
+  const color = normalizeHexColor(req.body?.color);
+  if (!color) {
+    res.status(400).json({ error: 'invalid_color', message: 'Color must be a 6-digit hex like #ff00aa.' });
+    return;
+  }
+
+  try {
+    await pool.query(
+      `
+        UPDATE user_claims
+        SET color_hex = $2
+        WHERE username_key = $1
+      `,
+      [req.auth.usernameKey, color]
+    );
+
+    for (const meta of wsClients.values()) {
+      if (meta.usernameKey === req.auth.usernameKey) {
+        meta.userColor = color;
+      }
+    }
+
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'profile_color_updated',
+        username: req.auth.username,
+        usernameKey: req.auth.usernameKey,
+        meta: {
+          color
+        }
+      })
+    );
+
+    res.json({ ok: true, color, palette: USER_COLOR_PALETTE });
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.post('/api/release', requireAuth, async (req, res, next) => {
@@ -1375,7 +1453,7 @@ app.get('/api/channels/:slug/messages', requireAuth, async (req, res, next) => {
 
     const messagesResult = await pool.query(
       `
-        SELECT id, channel_slug, username, text, created_at
+        SELECT id, channel_slug, username, text, color_hex, created_at
         FROM messages
         WHERE channel_slug = $1
         ORDER BY created_at DESC
@@ -1390,6 +1468,7 @@ app.get('/api/channels/:slug/messages', requireAuth, async (req, res, next) => {
         channel: row.channel_slug,
         username: row.username,
         text: row.text,
+        color: normalizeHexColor(row.color_hex) || null,
         timestamp: new Date(row.created_at).toISOString()
       }))
       .reverse();
@@ -2122,6 +2201,7 @@ wss.on('connection', async (ws, req) => {
     token,
     username: session.username,
     usernameKey: session.username_key,
+    userColor: normalizeHexColor(session.color_hex) || '#f8f8f8',
     ipAddress: wsIp,
     channel: null,
     connectionId: crypto.randomUUID(),
@@ -2254,16 +2334,18 @@ wss.on('connection', async (ws, req) => {
           id: crypto.randomUUID(),
           channel,
           username: localMeta.username,
+          usernameKey: localMeta.usernameKey,
+          color: normalizeHexColor(localMeta.userColor) || '#f8f8f8',
           text,
           timestamp: nowIso()
         };
 
         await pool.query(
           `
-            INSERT INTO messages (id, channel_slug, username, text, created_at)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO messages (id, channel_slug, username_key, username, color_hex, text, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
           `,
-          [message.id, message.channel, message.username, message.text, message.timestamp]
+          [message.id, message.channel, message.usernameKey, message.username, message.color, message.text, message.timestamp]
         );
 
         const messagePayload = { type: 'message', ...message };
@@ -2353,8 +2435,14 @@ async function initDatabase() {
     CREATE TABLE IF NOT EXISTS user_claims (
       username_key TEXT PRIMARY KEY,
       username_original TEXT NOT NULL,
+      color_hex TEXT NOT NULL DEFAULT '#f8f8f8',
       claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE user_claims
+    ADD COLUMN IF NOT EXISTS color_hex TEXT;
   `);
 
   await pool.query(`
@@ -2378,10 +2466,22 @@ async function initDatabase() {
     CREATE TABLE IF NOT EXISTS messages (
       id UUID PRIMARY KEY,
       channel_slug TEXT NOT NULL REFERENCES channels(slug) ON DELETE CASCADE,
+      username_key TEXT REFERENCES user_claims(username_key) ON DELETE SET NULL,
       username TEXT NOT NULL,
+      color_hex TEXT,
       text TEXT NOT NULL,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE messages
+    ADD COLUMN IF NOT EXISTS username_key TEXT;
+  `);
+
+  await pool.query(`
+    ALTER TABLE messages
+    ADD COLUMN IF NOT EXISTS color_hex TEXT;
   `);
 
   await pool.query(`
@@ -2412,6 +2512,8 @@ async function initDatabase() {
       meta_json JSONB
     );
   `);
+
+  await ensureUserColors();
 
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_messages_channel_created_at

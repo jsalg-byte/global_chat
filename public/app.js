@@ -1,10 +1,16 @@
 const MAX_MESSAGE_LENGTH = 2000;
 const USERNAME_REGEX = /^[A-Za-z0-9_]{3,24}$/;
 const KONAMI_SEQUENCE = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
+const USER_COLOR_PALETTE = [
+  '#000000', '#7f7f7f', '#880015', '#ed1c24', '#ff7f27', '#fff200', '#22b14c', '#00a2e8', '#3f48cc', '#a349a4',
+  '#ffffff', '#c3c3c3', '#b97a57', '#ffaec9', '#ffc90e', '#efe4b0', '#b5e61d', '#99d9ea', '#7092be', '#c8bfe7',
+  '#f8f8f8', '#d9d2e9', '#cfe2f3', '#d9ead3', '#fff2cc', '#fce5cd', '#f4cccc', '#ead1dc'
+];
 
 const state = {
   token: localStorage.getItem('chat_token'),
   username: null,
+  userColor: null,
   channels: [],
   channelMap: new Map(),
   messagesByChannel: new Map(),
@@ -36,6 +42,7 @@ const elements = {
   claimSubmit: document.getElementById('claim-submit'),
   claimError: document.getElementById('claim-error'),
   currentUsername: document.getElementById('current-username'),
+  chooseColor: document.getElementById('choose-color'),
   releaseUsername: document.getElementById('release-username'),
   channelList: document.getElementById('channel-list'),
   activeChannelName: document.getElementById('active-channel-name'),
@@ -99,6 +106,7 @@ function setConnectionBanner(text) {
 function clearSessionAndShowClaim() {
   state.token = null;
   state.username = null;
+  state.userColor = null;
   state.channels = [];
   state.channelMap = new Map();
   state.messagesByChannel = new Map();
@@ -218,6 +226,44 @@ function formatTimeOrDash(value) {
   return formatTime(value);
 }
 
+function normalizeHexColor(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const text = value.trim();
+  const match = text.match(/^#([0-9a-fA-F]{6})$/);
+  if (!match) {
+    return null;
+  }
+  return `#${match[1].toLowerCase()}`;
+}
+
+function colorFromUsername(username) {
+  const text = String(username || '');
+  if (!text) {
+    return '#f8f8f8';
+  }
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+  }
+  return USER_COLOR_PALETTE[hash % USER_COLOR_PALETTE.length];
+}
+
+function getTextColorForBackground(color) {
+  const normalized = normalizeHexColor(color);
+  if (!normalized) {
+    return '#111';
+  }
+
+  const r = Number.parseInt(normalized.slice(1, 3), 16);
+  const g = Number.parseInt(normalized.slice(3, 5), 16);
+  const b = Number.parseInt(normalized.slice(5, 7), 16);
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+
+  return luminance > 0.62 ? '#111' : '#fff';
+}
+
 function normalizeKonamiKey(key) {
   if (!key) {
     return '';
@@ -327,6 +373,43 @@ function openAboutModal() {
       </div>
       <div class="modal-section">
         <p class="modal-text">Built for fast conversation with lightweight moderation telemetry.</p>
+      </div>
+    `
+  );
+}
+
+async function updateUserColor(color) {
+  const normalized = normalizeHexColor(color);
+  if (!normalized) {
+    throw new Error('Invalid color.');
+  }
+
+  const result = await api('/api/profile/color', {
+    method: 'POST',
+    body: JSON.stringify({ color: normalized })
+  });
+
+  const resolved = normalizeHexColor(result.color) || normalized;
+  state.userColor = resolved;
+  renderMessages();
+  return resolved;
+}
+
+function openChooseColorModal() {
+  const active = normalizeHexColor(state.userColor) || '#f8f8f8';
+  const swatches = USER_COLOR_PALETTE.map((color) => {
+    const selected = color === active ? ' selected' : '';
+    return `<button type=\"button\" class=\"color-swatch-button${selected}\" data-color-swatch=\"${color}\" title=\"${color}\" style=\"background:${color}\"></button>`;
+  }).join('');
+
+  openAppModal(
+    'Choose Color',
+    `
+      <div class="modal-section">
+        <p class="modal-text">Pick a message background color.</p>
+      </div>
+      <div class="modal-section">
+        <div class="color-picker-grid">${swatches}</div>
       </div>
     `
   );
@@ -994,6 +1077,10 @@ function renderMessages() {
       row.classList.add('self');
     }
 
+    const messageColor = normalizeHexColor(msg.color) || colorFromUsername(msg.username);
+    row.style.backgroundColor = messageColor;
+    row.style.color = getTextColorForBackground(messageColor);
+
     const time = new Date(msg.timestamp).toLocaleTimeString([], {
       hour: '2-digit',
       minute: '2-digit'
@@ -1367,6 +1454,7 @@ async function initSession() {
   try {
     const session = await api('/api/session');
     state.username = session.username;
+    state.userColor = normalizeHexColor(session.color) || colorFromUsername(session.username);
     showApp();
     await loadChannels();
     connectWebSocket();
@@ -1402,6 +1490,7 @@ elements.claimForm.addEventListener('submit', async (event) => {
 
     state.token = result.token;
     state.username = result.username;
+    state.userColor = normalizeHexColor(result.color) || colorFromUsername(result.username);
     localStorage.setItem('chat_token', result.token);
 
     showApp();
@@ -1432,6 +1521,10 @@ elements.releaseUsername.addEventListener('click', async () => {
   }
 
   clearSessionAndShowClaim();
+});
+
+elements.chooseColor.addEventListener('click', () => {
+  openChooseColorModal();
 });
 
 elements.toggleCreateChannel.addEventListener('click', () => {
@@ -1689,6 +1782,23 @@ elements.appModalContent.addEventListener('click', async (event) => {
   const backButton = event.target.closest('[data-modal-back]');
   if (backButton) {
     goBackModalState();
+    return;
+  }
+
+  const swatch = event.target.closest('[data-color-swatch]');
+  if (swatch) {
+    const color = swatch.getAttribute('data-color-swatch') || '';
+    swatch.disabled = true;
+    try {
+      await updateUserColor(color);
+      openChooseColorModal();
+    } catch (error) {
+      showAdminError(error.message || 'Unable to update color.');
+    } finally {
+      if (swatch.isConnected) {
+        swatch.disabled = false;
+      }
+    }
     return;
   }
 
