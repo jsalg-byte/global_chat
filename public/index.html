@@ -4,106 +4,140 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>PulseRooms</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link
-      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;500&display=swap"
-      rel="stylesheet"
-    />
+    <link rel="stylesheet" href="https://unpkg.com/xp.css" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <div id="connection-status" class="connection-status" role="status" aria-live="polite" hidden></div>
 
-    <main>
+    <main class="desktop">
       <section id="claim-screen" class="claim-screen" aria-labelledby="claim-title">
-        <div class="claim-card">
-          <p class="eyebrow">Realtime Public Chat</p>
-          <h1 id="claim-title">Claim your username</h1>
-          <p class="hint">No password. Your browser token is your identity.</p>
-          <form id="claim-form" novalidate>
-            <label for="claim-username">Username</label>
-            <input
-              id="claim-username"
-              name="username"
-              autocomplete="off"
-              minlength="3"
-              maxlength="24"
-              pattern="[A-Za-z0-9_]{3,24}"
-              required
-              placeholder="e.g. chat_ace"
-            />
-            <button type="submit" id="claim-submit">Claim</button>
-          </form>
-          <p id="claim-error" class="form-error" role="alert"></p>
+        <div class="window claim-window" role="dialog" aria-modal="true" aria-labelledby="claim-title">
+          <div class="title-bar">
+            <div class="title-bar-text" id="claim-title">PulseRooms - Claim Username</div>
+            <div class="title-bar-controls">
+              <button aria-label="Help" type="button"></button>
+              <button aria-label="Close" type="button" disabled></button>
+            </div>
+          </div>
+          <div class="window-body">
+            <p>No password required. Your browser token is your identity.</p>
+            <form id="claim-form" novalidate>
+              <div class="field-row-stacked">
+                <label for="claim-username">Username</label>
+                <input
+                  id="claim-username"
+                  name="username"
+                  autocomplete="off"
+                  minlength="3"
+                  maxlength="24"
+                  pattern="[A-Za-z0-9_]{3,24}"
+                  required
+                  placeholder="chat_ace"
+                />
+              </div>
+              <div class="field-row form-actions">
+                <button type="submit" id="claim-submit">Claim</button>
+              </div>
+            </form>
+            <p id="claim-error" class="form-error" role="alert"></p>
+          </div>
         </div>
       </section>
 
       <section id="app-screen" class="app-screen" hidden>
-        <header class="app-header">
-          <div class="brand">
-            <div class="brand-dot" aria-hidden="true"></div>
-            <h2>PulseRooms</h2>
+        <div class="window app-window">
+          <div class="title-bar">
+            <div class="title-bar-text">PulseRooms Community Chat</div>
+            <div class="title-bar-controls">
+              <button aria-label="Minimize" type="button" disabled></button>
+              <button aria-label="Maximize" type="button" disabled></button>
+              <button aria-label="Close" type="button" disabled></button>
+            </div>
           </div>
-          <div class="session-controls">
-            <p id="current-username" class="username"></p>
-            <button id="release-username" class="secondary-btn" type="button">Release Username</button>
-          </div>
-        </header>
 
-        <div class="layout">
-          <aside class="sidebar" aria-label="Channel list">
-            <div class="sidebar-head">
-              <h3>Channels</h3>
-              <button id="toggle-create-channel" type="button">+ New Room</button>
+          <div class="window-body app-body">
+            <div class="top-strip">
+              <p class="username-line">Signed in as <strong id="current-username"></strong></p>
+              <button id="release-username" type="button">Release Username</button>
             </div>
 
-            <form id="create-channel-form" class="create-channel-form" hidden>
-              <label for="channel-name">Channel name</label>
-              <input id="channel-name" name="name" maxlength="60" placeholder="#general" required />
-              <label for="channel-description">Description (optional)</label>
-              <input id="channel-description" name="description" maxlength="120" placeholder="What is this room for?" />
-              <div class="create-actions">
-                <button type="submit">Create</button>
-                <button id="cancel-create-channel" type="button" class="secondary-btn">Cancel</button>
-              </div>
-              <p id="create-channel-error" class="form-error" role="alert"></p>
-            </form>
+            <div class="layout">
+              <aside class="window panel sidebar" aria-label="Channel list">
+                <div class="title-bar">
+                  <div class="title-bar-text">Channels</div>
+                  <div class="title-bar-controls">
+                    <button aria-label="Help" type="button" disabled></button>
+                  </div>
+                </div>
+                <div class="window-body sidebar-body">
+                  <div class="field-row" style="justify-content: flex-end">
+                    <button id="toggle-create-channel" type="button">+ New Room</button>
+                  </div>
 
-            <nav id="channel-list" class="channel-list" aria-label="Public channels"></nav>
-          </aside>
+                  <form id="create-channel-form" class="create-channel-form" hidden>
+                    <fieldset>
+                      <legend>Create room</legend>
+                      <div class="field-row-stacked">
+                        <label for="channel-name">Channel name</label>
+                        <input id="channel-name" name="name" maxlength="60" placeholder="#general" required />
+                      </div>
+                      <div class="field-row-stacked">
+                        <label for="channel-description">Description (optional)</label>
+                        <input id="channel-description" name="description" maxlength="120" placeholder="What is this room for?" />
+                      </div>
+                      <div class="field-row form-actions">
+                        <button type="submit">Create</button>
+                        <button id="cancel-create-channel" type="button">Cancel</button>
+                      </div>
+                    </fieldset>
+                    <p id="create-channel-error" class="form-error" role="alert"></p>
+                  </form>
 
-          <section class="chat-pane" aria-label="Chat pane">
-            <div class="chat-head">
-              <div>
-                <h3 id="active-channel-name">#general</h3>
-                <p id="active-channel-description" class="channel-description"></p>
-              </div>
-              <p id="active-online" class="online-pill">0 online</p>
+                  <nav id="channel-list" class="channel-list" aria-label="Public channels"></nav>
+                </div>
+              </aside>
+
+              <section class="window panel chat-pane" aria-label="Chat pane">
+                <div class="title-bar">
+                  <div class="title-bar-text">
+                    <span id="active-channel-name">#general</span>
+                  </div>
+                  <div class="title-bar-controls online-wrap">
+                    <span id="active-online" class="online-pill">0 online</span>
+                  </div>
+                </div>
+
+                <div class="window-body chat-body">
+                  <p id="active-channel-description" class="channel-description"></p>
+
+                  <div id="message-list" class="message-list" role="log" aria-live="polite" aria-relevant="additions"></div>
+
+                  <button id="new-message-nudge" class="new-message-nudge" hidden type="button">New messages</button>
+
+                  <p id="typing-indicator" class="typing-indicator" aria-live="polite"></p>
+
+                  <form id="message-form" class="message-form">
+                    <div class="field-row-stacked">
+                      <label class="sr-only" for="message-input">Type a message</label>
+                      <textarea id="message-input" rows="3" placeholder="Say something..." required></textarea>
+                    </div>
+                    <div class="field-row form-actions between">
+                      <p id="message-count" class="message-count">0 / 2000</p>
+                      <button id="send-message" type="submit">Send</button>
+                    </div>
+                  </form>
+                </div>
+
+                <div class="status-bar">
+                  <p class="status-bar-field">Public channels only</p>
+                  <p class="status-bar-field">Realtime WebSocket</p>
+                </div>
+
+                <div id="live-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
+              </section>
             </div>
-
-            <div id="message-list" class="message-list" role="log" aria-live="polite" aria-relevant="additions"></div>
-
-            <button id="new-message-nudge" class="new-message-nudge" hidden type="button">↓ new messages</button>
-
-            <p id="typing-indicator" class="typing-indicator" aria-live="polite"></p>
-
-            <form id="message-form" class="message-form">
-              <label class="sr-only" for="message-input">Type a message</label>
-              <textarea
-                id="message-input"
-                rows="2"
-                placeholder="Say something..."
-                required
-              ></textarea>
-              <div class="message-actions">
-                <p id="message-count" class="message-count">0 / 2000</p>
-                <button id="send-message" type="submit">Send</button>
-              </div>
-            </form>
-
-            <div id="live-announcer" class="sr-only" aria-live="polite" aria-atomic="true"></div>
-          </section>
+          </div>
         </div>
       </section>
     </main>
