@@ -162,7 +162,7 @@
               <button id="admin-close" aria-label="Close" type="button"></button>
             </div>
           </div>
-          <div class="window-body admin-body">
+          <div class="window-body admin-body has-space">
             <form id="admin-password-form" class="admin-password-form">
               <div class="field-row-stacked">
                 <label for="admin-password">Dashboard password</label>
@@ -176,15 +176,23 @@
             </form>
             <p id="admin-error" class="form-error" role="alert"></p>
 
-            <div id="admin-tabs" class="admin-tabs" hidden>
-              <button type="button" class="admin-tab active" data-admin-tab="events">All Events</button>
-              <button type="button" class="admin-tab" data-admin-tab="usernames">Usernames</button>
-              <button type="button" class="admin-tab" data-admin-tab="non-us">Non-USA IP Events</button>
-              <button type="button" class="admin-tab" data-admin-tab="channels">Chatrooms</button>
-            </div>
+            <menu id="admin-tabs" class="admin-tabs" role="tablist" hidden>
+              <button type="button" role="tab" class="admin-tab active" data-admin-tab="events" aria-selected="true" aria-controls="admin-panel-events">
+                All Events
+              </button>
+              <button type="button" role="tab" class="admin-tab" data-admin-tab="usernames" aria-selected="false" aria-controls="admin-panel-usernames">
+                Usernames
+              </button>
+              <button type="button" role="tab" class="admin-tab" data-admin-tab="non-us" aria-selected="false" aria-controls="admin-panel-non-us">
+                Non-USA IP Events
+              </button>
+              <button type="button" role="tab" class="admin-tab" data-admin-tab="channels" aria-selected="false" aria-controls="admin-panel-channels">
+                Chatrooms
+              </button>
+            </menu>
 
             <div id="admin-panels" class="admin-panels" hidden>
-              <div id="admin-panel-events" class="admin-panel">
+              <div id="admin-panel-events" class="admin-panel" role="tabpanel">
                 <div class="admin-table-wrap">
                   <table class="admin-table">
                     <thead>
@@ -204,7 +212,7 @@
                 </div>
               </div>
 
-              <div id="admin-panel-usernames" class="admin-panel" hidden>
+              <div id="admin-panel-usernames" class="admin-panel" role="tabpanel" hidden>
                 <div class="admin-table-wrap">
                   <table class="admin-table">
                     <thead>
@@ -223,7 +231,7 @@
                 </div>
               </div>
 
-              <div id="admin-panel-non-us" class="admin-panel" hidden>
+              <div id="admin-panel-non-us" class="admin-panel" role="tabpanel" hidden>
                 <div class="admin-table-wrap">
                   <table class="admin-table">
                     <thead>
@@ -243,7 +251,7 @@
                 </div>
               </div>
 
-              <div id="admin-panel-channels" class="admin-panel" hidden>
+              <div id="admin-panel-channels" class="admin-panel" role="tabpanel" hidden>
                 <div class="admin-table-wrap">
                   <table class="admin-table">
                     <thead>

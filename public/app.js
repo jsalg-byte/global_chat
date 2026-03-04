@@ -22,7 +22,8 @@ const state = {
   adminPassword: '',
   adminActiveTab: 'events',
   adminEvents: [],
-  adminNonUsEvents: []
+  adminNonUsEvents: [],
+  modalStack: []
 };
 
 const elements = {
@@ -182,6 +183,25 @@ function closeAppModal() {
   elements.appModal.hidden = true;
   elements.appModal.setAttribute('aria-hidden', 'true');
   elements.appModalContent.innerHTML = '';
+  state.modalStack = [];
+}
+
+function pushModalState() {
+  if (elements.appModal.hidden) {
+    return;
+  }
+  state.modalStack.push({
+    title: elements.appModalTitle.textContent,
+    content: elements.appModalContent.innerHTML
+  });
+}
+
+function goBackModalState() {
+  const previous = state.modalStack.pop();
+  if (!previous) {
+    return;
+  }
+  openAppModal(previous.title, previous.content);
 }
 
 function formatMaybe(value, fallback = '-') {
@@ -281,6 +301,7 @@ function buildInspectButton(source, index) {
 }
 
 function openInspectModal(event) {
+  state.modalStack = [];
   const details = buildDetailsPayload(event);
   const route = [event.method, event.path].filter(Boolean).join(' ');
   const summary = `
@@ -297,6 +318,7 @@ function openInspectModal(event) {
 }
 
 function openAboutModal() {
+  state.modalStack = [];
   openAppModal(
     'About This Site',
     `
@@ -358,6 +380,10 @@ function buildSingleIpIntelModal(payload) {
 
   return `
     <div class="modal-section">
+      <button type="button" data-modal-back>Back</button>
+    </div>
+
+    <div class="modal-section">
       <h4>Location (Last IP)</h4>
       <p class="modal-text"><strong>Place:</strong> ${escapeHtml(locationText)}</p>
       <p class="modal-text"><strong>Timezone:</strong> ${escapeHtml(formatMaybe(location?.timezone))}</p>
@@ -395,10 +421,12 @@ async function openSingleIpIntelModal(ipAddress) {
   }
 
   try {
+    pushModalState();
     openAppModal(`Loading IP: ${ipAddress}`, '<p class="modal-text">Loading...</p>');
     const payload = await fetchAdminIpIntel(ipAddress);
     openAppModal(`IP Intelligence: ${payload.ip || ipAddress}`, buildSingleIpIntelModal(payload));
   } catch (error) {
+    goBackModalState();
     showAdminError(error.message || 'Unable to load IP intelligence.');
   }
 }
@@ -586,6 +614,7 @@ async function openUserIpDetailsModal(usernameKey) {
 
   try {
     showAdminError('');
+    state.modalStack = [];
     openAppModal('Loading IP Details...', '<p class="modal-text">Loading...</p>');
     const payload = await fetchAdminIpDetails(usernameKey);
     openAppModal(`IP Details: ${payload?.user?.username_original || usernameKey}`, buildIpDetailsModal(payload));
@@ -1657,6 +1686,12 @@ elements.appModal.addEventListener('click', (event) => {
 });
 
 elements.appModalContent.addEventListener('click', async (event) => {
+  const backButton = event.target.closest('[data-modal-back]');
+  if (backButton) {
+    goBackModalState();
+    return;
+  }
+
   const button = event.target.closest('[data-ip-intel-open]');
   if (!button) {
     return;
