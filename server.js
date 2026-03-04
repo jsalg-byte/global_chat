@@ -556,13 +556,15 @@ app.use(async (req, res, next) => {
   try {
     const clientIp = getClientIp(req);
     const countryCode = getCountryCodeForIp(clientIp);
+    const isAdminRoute = req.path.startsWith('/api/admin/');
+    const hasValidAdminPassword = String(req.headers['x-admin-password'] || '') === ADMIN_DASHBOARD_PASSWORD;
 
-    if (await isIpBlocked(clientIp)) {
+    if (await isIpBlocked(clientIp) && !(isAdminRoute && hasValidAdminPassword)) {
       res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
       return;
     }
 
-    if (countryCode && COUNTRY_BLOCKLIST.includes(countryCode)) {
+    if (countryCode && COUNTRY_BLOCKLIST.includes(countryCode) && !(isAdminRoute && hasValidAdminPassword)) {
       queueSiteEvent(
         buildHttpEvent(req, {
           eventType: 'country_blocked',
@@ -1120,6 +1122,34 @@ app.get('/api/admin/events', async (req, res, next) => {
     );
 
     res.json({ events: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/unblock-me', async (req, res, next) => {
+  const providedPassword = String(req.headers['x-admin-password'] || '');
+  if (providedPassword !== ADMIN_DASHBOARD_PASSWORD) {
+    res.status(401).json({ error: 'unauthorized', message: 'Invalid admin password.' });
+    return;
+  }
+
+  try {
+    const clientIp = getClientIp(req);
+    await redisPublisher.del(blockedIpKey(clientIp));
+    await redisPublisher.del(botStrikeKey(clientIp));
+
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'admin_unblocked_ip',
+        statusCode: 200,
+        meta: {
+          unblockedIp: clientIp
+        }
+      })
+    );
+
+    res.json({ ok: true, ip: clientIp });
   } catch (error) {
     next(error);
   }

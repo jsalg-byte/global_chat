@@ -57,6 +57,7 @@ const elements = {
   adminPasswordInput: document.getElementById('admin-password'),
   adminUnlock: document.getElementById('admin-unlock'),
   adminRefresh: document.getElementById('admin-refresh'),
+  adminUnblock: document.getElementById('admin-unblock'),
   adminError: document.getElementById('admin-error'),
   adminTableWrap: document.getElementById('admin-table-wrap'),
   adminTableBody: document.getElementById('admin-table-body')
@@ -172,6 +173,7 @@ function openAdminDashboard() {
 
   elements.adminTableWrap.hidden = true;
   elements.adminRefresh.hidden = true;
+  elements.adminUnblock.hidden = true;
   elements.adminPasswordInput.focus();
 }
 
@@ -268,11 +270,13 @@ async function loadAdminEvents(password) {
     state.adminPassword = password;
     elements.adminTableWrap.hidden = false;
     elements.adminRefresh.hidden = false;
+    elements.adminUnblock.hidden = false;
     renderAdminEvents(payload.events || []);
   } catch (error) {
     state.adminPassword = '';
     elements.adminTableWrap.hidden = true;
     elements.adminRefresh.hidden = true;
+    elements.adminUnblock.hidden = true;
     showAdminError(error.message || 'Unable to load dashboard.');
   } finally {
     elements.adminUnlock.disabled = false;
@@ -667,7 +671,12 @@ async function initSession() {
     await loadChannels();
     connectWebSocket();
   } catch (error) {
-    clearSessionAndShowClaim();
+    if (error.status === 401) {
+      clearSessionAndShowClaim();
+      return;
+    }
+
+    setConnectionBanner(error.message || 'Unable to initialize session.');
   }
 }
 
@@ -842,6 +851,34 @@ elements.adminPasswordForm.addEventListener('submit', async (event) => {
 elements.adminRefresh.addEventListener('click', async () => {
   const password = state.adminPassword || elements.adminPasswordInput.value;
   await loadAdminEvents(password);
+});
+
+elements.adminUnblock.addEventListener('click', async () => {
+  const password = state.adminPassword || elements.adminPasswordInput.value;
+  if (!password) {
+    showAdminError('Password required.');
+    return;
+  }
+
+  showAdminError('');
+
+  try {
+    const response = await fetch('/api/admin/unblock-me', {
+      method: 'POST',
+      headers: {
+        'x-admin-password': password
+      }
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.message || 'Failed to unblock IP.');
+    }
+
+    await loadAdminEvents(password);
+  } catch (error) {
+    showAdminError(error.message || 'Failed to unblock IP.');
+  }
 });
 
 window.addEventListener('keydown', (event) => {
