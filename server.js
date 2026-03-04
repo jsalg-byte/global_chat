@@ -1,13 +1,18 @@
 require('dotenv').config();
 
 const crypto = require('crypto');
+const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const { URL } = require('url');
 
 const express = require('express');
+const { Reader: MaxMindReader } = require('@maxmind/geoip2-node');
 const geoip = require('geoip-lite');
+const { IP2Proxy } = require('ip2proxy-nodejs');
+const ipaddr = require('ipaddr.js');
 const { Pool } = require('pg');
+const requestIp = require('request-ip');
 const { createClient } = require('redis');
 const { WebSocketServer } = require('ws');
 
@@ -26,6 +31,9 @@ const WS_MESSAGE_RATE_LIMIT_MAX = Number(process.env.WS_MESSAGE_RATE_LIMIT_MAX |
 const HONEYPOT_BLOCK_SECONDS = Number(process.env.HONEYPOT_BLOCK_SECONDS || 86400);
 const PRESENCE_TTL_SECONDS = Number(process.env.PRESENCE_TTL_SECONDS || 120);
 const PRESENCE_HEARTBEAT_SECONDS = Number(process.env.PRESENCE_HEARTBEAT_SECONDS || 25);
+const MAXMIND_CITY_DB_PATH = process.env.MAXMIND_CITY_DB_PATH || path.join(__dirname, 'data', 'GeoLite2-City.mmdb');
+const MAXMIND_ASN_DB_PATH = process.env.MAXMIND_ASN_DB_PATH || path.join(__dirname, 'data', 'GeoLite2-ASN.mmdb');
+const IP2PROXY_DB_PATH = process.env.IP2PROXY_DB_PATH || path.join(__dirname, 'data', 'IP2PROXY.BIN');
 const COUNTRY_BLOCKLIST = String(process.env.COUNTRY_BLOCKLIST || 'CN')
   .split(',')
   .map((entry) => entry.trim().toUpperCase())
@@ -69,6 +77,22 @@ const redisSubscriber = createClient({ url: REDIS_URL });
 
 const wsClients = new Map();
 const subscribers = new Map();
+const maxMindReaders = {
+  city: null,
+  asn: null
+};
+const ip2proxyClient = new IP2Proxy();
+let ip2proxyReady = false;
+
+process.on('exit', () => {
+  if (ip2proxyReady) {
+    try {
+      ip2proxyClient.close();
+    } catch (error) {
+      // Ignore close errors during shutdown.
+    }
+  }
+});
 
 function slugifyChannelName(input) {
   const cleaned = String(input || '')
@@ -256,32 +280,212 @@ function parseIpFromForwarded(forwarded) {
 }
 
 function getClientIp(req) {
+  const fromExtractor = normalizeIp(requestIp.getClientIp(req));
+  if (fromExtractor) {
+    return fromExtractor;
+  }
+
   const forwardedForRaw = req.headers['x-forwarded-for'];
   const forwardedFor = Array.isArray(forwardedForRaw)
     ? forwardedForRaw.join(',')
     : forwardedForRaw || null;
 
-  return parseIpFromForwarded(forwardedFor) || req.ip || req.socket?.remoteAddress || 'unknown';
+  const fromForwarded = normalizeIp(parseIpFromForwarded(forwardedFor));
+  const fromReqIp = normalizeIp(req.ip);
+  const fromSocket = normalizeIp(req.socket?.remoteAddress);
+
+  return fromForwarded || fromReqIp || fromSocket || 'unknown';
 }
 
 function normalizeIp(ipAddress) {
   if (!ipAddress) {
     return null;
   }
-  const text = String(ipAddress).trim();
-  if (text.startsWith('::ffff:')) {
-    return text.slice(7);
+
+  const text = String(ipAddress).trim().replace(/^\[|\]$/g, '');
+  if (!text || text.toLowerCase() === 'unknown') {
+    return null;
+  }
+
+  const zoneIndex = text.indexOf('%');
+  const withoutZone = zoneIndex >= 0 ? text.slice(0, zoneIndex) : text;
+
+  if (!ipaddr.isValid(withoutZone)) {
+    return null;
+  }
+
+  try {
+    return ipaddr.process(withoutZone).toString();
+  } catch (error) {
+    try {
+      return ipaddr.parse(withoutZone).toString();
+    } catch (innerError) {
+      return null;
+    }
+  }
+}
+
+function classifyIpAddress(ipAddress) {
+  const normalized = normalizeIp(ipAddress);
+  if (!normalized) {
+    return null;
+  }
+
+  try {
+    const parsed = ipaddr.parse(normalized);
+    const range = parsed.range();
+    return {
+      ip: normalized,
+      version: parsed.kind(),
+      range,
+      isPublic: range === 'unicast'
+    };
+  } catch (error) {
+    return null;
+  }
+}
+
+function isIpLocalOrLoopback(ipAddress) {
+  const profile = classifyIpAddress(ipAddress);
+  if (!profile) {
+    return true;
+  }
+  return ['loopback', 'private', 'linkLocal', 'uniqueLocal', 'unspecified'].includes(profile.range);
+}
+
+function toCleanExternalValue(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const text = String(value).trim();
+  if (!text || text === '-' || text === '?' || text.toUpperCase() === 'N/A') {
+    return null;
   }
   return text;
 }
 
-function getCountryCodeForIp(ipAddress) {
-  const normalized = normalizeIp(ipAddress);
-  if (!normalized || normalized === 'unknown' || normalized === '::1' || normalized === '127.0.0.1') {
+function lookupMaxMindCity(ipAddress) {
+  if (!maxMindReaders.city) {
     return null;
   }
-  const found = geoip.lookup(normalized);
-  return found?.country || null;
+  try {
+    return maxMindReaders.city.city(ipAddress);
+  } catch (error) {
+    return null;
+  }
+}
+
+function lookupMaxMindAsn(ipAddress) {
+  if (!maxMindReaders.asn) {
+    return null;
+  }
+  try {
+    return maxMindReaders.asn.asn(ipAddress);
+  } catch (error) {
+    return null;
+  }
+}
+
+function getGeoDetailsForIp(ipAddress) {
+  const normalized = normalizeIp(ipAddress);
+  if (!normalized || isIpLocalOrLoopback(normalized)) {
+    return null;
+  }
+
+  const city = lookupMaxMindCity(normalized);
+  const asn = lookupMaxMindAsn(normalized);
+  const fallback = geoip.lookup(normalized);
+  const fallbackLat = Array.isArray(fallback?.ll) ? fallback.ll[0] : null;
+  const fallbackLon = Array.isArray(fallback?.ll) ? fallback.ll[1] : null;
+
+  const countryCode = city?.country?.isoCode || fallback?.country || null;
+  const countryName = city?.country?.names?.en || null;
+  const cityName = city?.city?.names?.en || fallback?.city || null;
+  const regionCode = city?.subdivisions?.[0]?.isoCode || fallback?.region || null;
+  const regionName = city?.subdivisions?.[0]?.names?.en || null;
+  const postalCode = city?.postal?.code || null;
+  const timezone = city?.location?.timeZone || fallback?.timezone || null;
+  const latitude = city?.location?.latitude ?? fallbackLat;
+  const longitude = city?.location?.longitude ?? fallbackLon;
+  const accuracyRadiusKm = city?.location?.accuracyRadius ?? null;
+  const asnNumber = asn?.autonomousSystemNumber ?? city?.traits?.autonomousSystemNumber ?? null;
+  const asnOrg = asn?.autonomousSystemOrganization || city?.traits?.autonomousSystemOrganization || null;
+  const network = toCleanExternalValue(asn?.network || city?.traits?.network);
+
+  return {
+    ip: normalized,
+    country_code: countryCode,
+    country_name: countryName,
+    region_code: regionCode,
+    region_name: regionName,
+    city: cityName,
+    postal_code: postalCode,
+    timezone,
+    latitude,
+    longitude,
+    accuracy_radius_km: accuracyRadiusKm,
+    autonomous_system_number: asnNumber,
+    autonomous_system_organization: asnOrg,
+    network
+  };
+}
+
+function getProxyDetailsForIp(ipAddress) {
+  const normalized = normalizeIp(ipAddress);
+  if (!normalized || !ip2proxyReady) {
+    return null;
+  }
+
+  try {
+    const data = ip2proxyClient.getAll(normalized);
+    const isProxyRaw = Number(data?.isProxy ?? -1);
+
+    return {
+      ip: normalized,
+      database_available: true,
+      is_proxy: isProxyRaw === 1 || isProxyRaw === 2,
+      is_datacenter: isProxyRaw === 2,
+      proxy_type: toCleanExternalValue(data?.proxyType),
+      provider: toCleanExternalValue(data?.provider),
+      usage_type: toCleanExternalValue(data?.usageType),
+      isp: toCleanExternalValue(data?.isp),
+      domain: toCleanExternalValue(data?.domain),
+      threat: toCleanExternalValue(data?.threat),
+      fraud_score: toCleanExternalValue(data?.fraudScore),
+      last_seen_days: toCleanExternalValue(data?.lastSeen),
+      country_code: toCleanExternalValue(data?.countryShort),
+      country_name: toCleanExternalValue(data?.countryLong),
+      region: toCleanExternalValue(data?.region),
+      city: toCleanExternalValue(data?.city),
+      asn: toCleanExternalValue(data?.asn),
+      as_name: toCleanExternalValue(data?.as)
+    };
+  } catch (error) {
+    return {
+      ip: normalized,
+      database_available: true,
+      error: 'lookup_failed'
+    };
+  }
+}
+
+function getIpIntelligenceForIp(ipAddress) {
+  const normalized = normalizeIp(ipAddress);
+  if (!normalized) {
+    return null;
+  }
+
+  return {
+    ip: normalized,
+    network: classifyIpAddress(normalized),
+    geo: getGeoDetailsForIp(normalized),
+    proxy: getProxyDetailsForIp(normalized)
+  };
+}
+
+function getCountryCodeForIp(ipAddress) {
+  const details = getGeoDetailsForIp(ipAddress);
+  return details?.country_code || null;
 }
 
 function hasHoneypotPayload(req) {
@@ -351,6 +555,43 @@ function isSuspiciousUserAgent(userAgent) {
   ];
 
   return patterns.some((pattern) => ua.includes(pattern));
+}
+
+async function loadMaxMindReader(dbPath, label) {
+  if (!dbPath || !fs.existsSync(dbPath)) {
+    return null;
+  }
+
+  try {
+    const reader = await MaxMindReader.open(dbPath);
+    console.log(`Loaded ${label} database from ${dbPath}`);
+    return reader;
+  } catch (error) {
+    console.warn(`Failed to load ${label} database from ${dbPath}:`, error.message);
+    return null;
+  }
+}
+
+async function initIpIntelligenceProviders() {
+  maxMindReaders.city = await loadMaxMindReader(MAXMIND_CITY_DB_PATH, 'MaxMind City');
+  maxMindReaders.asn = await loadMaxMindReader(MAXMIND_ASN_DB_PATH, 'MaxMind ASN');
+
+  if (!fs.existsSync(IP2PROXY_DB_PATH)) {
+    console.warn(`IP2Proxy BIN not found at ${IP2PROXY_DB_PATH}; VPN/proxy detection is disabled.`);
+    return;
+  }
+
+  try {
+    const status = ip2proxyClient.open(IP2PROXY_DB_PATH);
+    if (status === 0) {
+      ip2proxyReady = true;
+      console.log(`Loaded IP2Proxy BIN from ${IP2PROXY_DB_PATH}`);
+      return;
+    }
+    console.warn(`Failed to open IP2Proxy BIN from ${IP2PROXY_DB_PATH}; status=${status}`);
+  } catch (error) {
+    console.warn(`Failed to load IP2Proxy BIN from ${IP2PROXY_DB_PATH}:`, error.message);
+  }
 }
 
 async function consumeRateLimit(bucket, identifier, windowSec, maxRequests) {
@@ -524,13 +765,14 @@ function buildHttpEvent(req, extras = {}) {
   const forwardedFor = Array.isArray(forwardedForRaw)
     ? forwardedForRaw.join(',')
     : forwardedForRaw || null;
+  const clientIp = getClientIp(req);
 
   return {
     eventType: extras.eventType || 'http_request',
     eventTime: extras.eventTime || nowIso(),
-    ipAddress: parseIpFromForwarded(forwardedFor) || req.ip || null,
+    ipAddress: clientIp === 'unknown' ? null : clientIp,
     forwardedFor: trimValue(forwardedFor, 512),
-    remoteAddress: req.socket?.remoteAddress || null,
+    remoteAddress: normalizeIp(req.socket?.remoteAddress) || null,
     method: req.method,
     path: req.originalUrl,
     statusCode: extras.statusCode ?? null,
@@ -556,13 +798,14 @@ function buildWsEvent(req, extras = {}) {
   const forwardedFor = Array.isArray(forwardedForRaw)
     ? forwardedForRaw.join(',')
     : forwardedForRaw || null;
+  const clientIp = getClientIp(req);
 
   return {
     eventType: extras.eventType,
     eventTime: nowIso(),
-    ipAddress: parseIpFromForwarded(forwardedFor) || req.socket?.remoteAddress || null,
+    ipAddress: clientIp === 'unknown' ? null : clientIp,
     forwardedFor: trimValue(forwardedFor, 512),
-    remoteAddress: req.socket?.remoteAddress || null,
+    remoteAddress: normalizeIp(req.socket?.remoteAddress) || null,
     method: extras.method || 'WS',
     path: extras.path || req.url,
     statusCode: extras.statusCode ?? null,
@@ -1422,8 +1665,21 @@ app.get('/api/admin/usernames/:usernameKey/ip-details', async (req, res, next) =
       [usernameKeyInput, historyLimit]
     );
 
+    const ipIntelCache = new Map();
+    const getCachedIntel = (ipAddress) => {
+      const normalized = normalizeIp(ipAddress);
+      if (!normalized) {
+        return null;
+      }
+      if (!ipIntelCache.has(normalized)) {
+        ipIntelCache.set(normalized, getIpIntelligenceForIp(normalized));
+      }
+      return ipIntelCache.get(normalized);
+    };
+
     const recentVisits = recentVisitsResult.rows.map((row) => {
       const ipAddress = normalizeIp(row.candidate_ip);
+      const intelligence = getCachedIntel(ipAddress);
       return {
         event_time: row.event_time,
         event_type: row.event_type,
@@ -1433,15 +1689,22 @@ app.get('/api/admin/usernames/:usernameKey/ip-details', async (req, res, next) =
         duration_ms: row.duration_ms,
         user_agent: row.user_agent,
         ip_address: ipAddress,
-        country_code: getCountryCodeForIp(ipAddress)
+        country_code: intelligence?.geo?.country_code || null,
+        ip_range: intelligence?.network?.range || null,
+        is_proxy: intelligence?.proxy?.is_proxy ?? null,
+        proxy_type: intelligence?.proxy?.proxy_type || null
       };
     });
 
     const ipHistory = ipHistoryResult.rows.map((row) => {
       const ipAddress = normalizeIp(row.candidate_ip);
+      const intelligence = getCachedIntel(ipAddress);
       return {
         ip_address: ipAddress,
-        country_code: getCountryCodeForIp(ipAddress),
+        country_code: intelligence?.geo?.country_code || null,
+        ip_range: intelligence?.network?.range || null,
+        is_proxy: intelligence?.proxy?.is_proxy ?? null,
+        proxy_type: intelligence?.proxy?.proxy_type || null,
         hit_count: Number(row.hit_count || 0),
         first_seen_at: row.first_seen_at,
         last_seen_at: row.last_seen_at
@@ -1452,27 +1715,48 @@ app.get('/api/admin/usernames/:usernameKey/ip-details', async (req, res, next) =
     const lastIp = latestVisitWithIp?.ip_address || ipHistory[0]?.ip_address || null;
     const lastSeenAt = latestVisitWithIp?.event_time || ipHistory[0]?.last_seen_at || null;
 
-    let location = null;
-    if (lastIp) {
-      const geo = geoip.lookup(lastIp);
-      if (geo) {
-        location = {
-          country_code: geo.country || null,
-          region: geo.region || null,
+    const lastIpIntel = getCachedIntel(lastIp);
+    const geo = lastIpIntel?.geo || null;
+    const location = geo
+      ? {
+          country_code: geo.country_code || null,
+          country_name: geo.country_name || null,
+          region: geo.region_code || geo.region_name || null,
+          region_name: geo.region_name || null,
           city: geo.city || null,
+          postal_code: geo.postal_code || null,
           timezone: geo.timezone || null,
-          latitude: Array.isArray(geo.ll) ? geo.ll[0] : null,
-          longitude: Array.isArray(geo.ll) ? geo.ll[1] : null,
-          metro: geo.metro ?? null
-        };
-      }
-    }
+          latitude: geo.latitude ?? null,
+          longitude: geo.longitude ?? null,
+          accuracy_radius_km: geo.accuracy_radius_km ?? null,
+          autonomous_system_number: geo.autonomous_system_number ?? null,
+          autonomous_system_organization: geo.autonomous_system_organization || null,
+          network: geo.network || null
+        }
+      : null;
+
+    const networkProfile = lastIpIntel?.network || null;
+    const proxyProfile = lastIpIntel?.proxy || {
+      ip: lastIp || null,
+      database_available: ip2proxyReady,
+      is_proxy: null
+    };
 
     res.json({
       user: userResult.rows[0],
       last_ip: lastIp,
       last_seen_at: lastSeenAt,
       location,
+      network_profile: networkProfile,
+      proxy_profile: proxyProfile,
+      ip_intelligence: lastIpIntel,
+      intelligence_sources: {
+        request_ip: true,
+        ipaddr: true,
+        maxmind_city: Boolean(maxMindReaders.city),
+        maxmind_asn: Boolean(maxMindReaders.asn),
+        ip2proxy: Boolean(ip2proxyReady)
+      },
       recent_visits: recentVisits,
       ip_history: ipHistory
     });
@@ -2106,6 +2390,7 @@ async function start() {
   await redisSubscriber.connect();
   await redisSubscriber.subscribe(EVENTS_CHANNEL, handleRedisEvent);
 
+  await initIpIntelligenceProviders();
   await initDatabase();
 
   server.listen(PORT, () => {

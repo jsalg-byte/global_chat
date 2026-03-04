@@ -322,6 +322,9 @@ async function fetchAdminIpDetails(usernameKey) {
 function buildIpDetailsModal(payload) {
   const user = payload.user || {};
   const location = payload.location || null;
+  const networkProfile = payload.network_profile || null;
+  const proxyProfile = payload.proxy_profile || null;
+  const sources = payload.intelligence_sources || {};
   const recentVisits = Array.isArray(payload.recent_visits) ? payload.recent_visits : [];
   const ipHistory = Array.isArray(payload.ip_history) ? payload.ip_history : [];
 
@@ -352,11 +355,14 @@ function buildIpDetailsModal(payload) {
               <td>${escapeHtml(formatMaybe(visit.status_code))}</td>
               <td>${escapeHtml(formatMaybe(visit.ip_address))}</td>
               <td>${escapeHtml(formatMaybe(visit.country_code))}</td>
+              <td>${escapeHtml(formatMaybe(visit.ip_range))}</td>
+              <td>${escapeHtml(formatMaybe(visit.is_proxy === null ? '-' : visit.is_proxy ? 'Yes' : 'No'))}</td>
+              <td>${escapeHtml(formatMaybe(visit.proxy_type))}</td>
             </tr>
           `;
         })
         .join('')
-    : '<tr><td class="admin-empty" colspan="6">No recent visits.</td></tr>';
+    : '<tr><td class="admin-empty" colspan="9">No recent visits.</td></tr>';
 
   const historyRows = ipHistory.length
     ? ipHistory
@@ -365,6 +371,9 @@ function buildIpDetailsModal(payload) {
             <tr>
               <td>${escapeHtml(formatMaybe(entry.ip_address))}</td>
               <td>${escapeHtml(formatMaybe(entry.country_code))}</td>
+              <td>${escapeHtml(formatMaybe(entry.ip_range))}</td>
+              <td>${escapeHtml(formatMaybe(entry.is_proxy === null ? '-' : entry.is_proxy ? 'Yes' : 'No'))}</td>
+              <td>${escapeHtml(formatMaybe(entry.proxy_type))}</td>
               <td>${escapeHtml(formatMaybe(entry.hit_count))}</td>
               <td>${escapeHtml(formatTimeOrDash(entry.first_seen_at))}</td>
               <td>${escapeHtml(formatTimeOrDash(entry.last_seen_at))}</td>
@@ -372,7 +381,31 @@ function buildIpDetailsModal(payload) {
           `;
         })
         .join('')
-    : '<tr><td class="admin-empty" colspan="5">No IP history.</td></tr>';
+    : '<tr><td class="admin-empty" colspan="8">No IP history.</td></tr>';
+
+  const proxyStatus = (() => {
+    if (!proxyProfile) {
+      return '-';
+    }
+    if (proxyProfile.database_available === false) {
+      return 'IP2Proxy DB not loaded';
+    }
+    if (proxyProfile.is_proxy === true) {
+      return 'Yes';
+    }
+    if (proxyProfile.is_proxy === false) {
+      return 'No';
+    }
+    return 'Unknown';
+  })();
+
+  const sourcesText = [
+    `request-ip: ${sources.request_ip ? 'on' : 'off'}`,
+    `ipaddr.js: ${sources.ipaddr ? 'on' : 'off'}`,
+    `MaxMind City DB: ${sources.maxmind_city ? 'on' : 'off'}`,
+    `MaxMind ASN DB: ${sources.maxmind_asn ? 'on' : 'off'}`,
+    `IP2Proxy DB: ${sources.ip2proxy ? 'on' : 'off'}`
+  ].join(' | ');
 
   return `
     <div class="modal-section">
@@ -387,6 +420,29 @@ function buildIpDetailsModal(payload) {
       <p class="modal-text"><strong>Place:</strong> ${escapeHtml(locationText)}</p>
       <p class="modal-text"><strong>Timezone:</strong> ${escapeHtml(formatMaybe(location?.timezone))}</p>
       <p class="modal-text"><strong>Coordinates:</strong> ${escapeHtml(coords)}</p>
+      <p class="modal-text"><strong>Postal Code:</strong> ${escapeHtml(formatMaybe(location?.postal_code))}</p>
+      <p class="modal-text"><strong>ASN:</strong> ${escapeHtml(formatMaybe(location?.autonomous_system_number))}</p>
+      <p class="modal-text"><strong>ASN Org:</strong> ${escapeHtml(formatMaybe(location?.autonomous_system_organization))}</p>
+    </div>
+
+    <div class="modal-section">
+      <h4>Network Profile</h4>
+      <p class="modal-text"><strong>Version:</strong> ${escapeHtml(formatMaybe(networkProfile?.version))}</p>
+      <p class="modal-text"><strong>Range:</strong> ${escapeHtml(formatMaybe(networkProfile?.range))}</p>
+      <p class="modal-text"><strong>Public Routable:</strong> ${escapeHtml(formatMaybe(networkProfile?.isPublic === null || networkProfile?.isPublic === undefined ? '-' : networkProfile.isPublic ? 'Yes' : 'No'))}</p>
+    </div>
+
+    <div class="modal-section">
+      <h4>VPN / Proxy Detection</h4>
+      <p class="modal-text"><strong>Detected Proxy/VPN:</strong> ${escapeHtml(proxyStatus)}</p>
+      <p class="modal-text"><strong>Proxy Type:</strong> ${escapeHtml(formatMaybe(proxyProfile?.proxy_type))}</p>
+      <p class="modal-text"><strong>Provider:</strong> ${escapeHtml(formatMaybe(proxyProfile?.provider))}</p>
+      <p class="modal-text"><strong>Usage Type:</strong> ${escapeHtml(formatMaybe(proxyProfile?.usage_type))}</p>
+      <p class="modal-text"><strong>Threat:</strong> ${escapeHtml(formatMaybe(proxyProfile?.threat))}</p>
+      <p class="modal-text"><strong>Fraud Score:</strong> ${escapeHtml(formatMaybe(proxyProfile?.fraud_score))}</p>
+      <p class="modal-text"><strong>ISP:</strong> ${escapeHtml(formatMaybe(proxyProfile?.isp))}</p>
+      <p class="modal-text"><strong>Domain:</strong> ${escapeHtml(formatMaybe(proxyProfile?.domain))}</p>
+      <p class="modal-text"><strong>Last Seen (days):</strong> ${escapeHtml(formatMaybe(proxyProfile?.last_seen_days))}</p>
     </div>
 
     <div class="modal-section">
@@ -401,6 +457,9 @@ function buildIpDetailsModal(payload) {
               <th>Status</th>
               <th>IP</th>
               <th>Country</th>
+              <th>Range</th>
+              <th>Proxy</th>
+              <th>Type</th>
             </tr>
           </thead>
           <tbody>${recentRows}</tbody>
@@ -416,6 +475,9 @@ function buildIpDetailsModal(payload) {
             <tr>
               <th>IP</th>
               <th>Country</th>
+              <th>Range</th>
+              <th>Proxy</th>
+              <th>Type</th>
               <th>Visits</th>
               <th>First Seen</th>
               <th>Last Seen</th>
@@ -424,6 +486,10 @@ function buildIpDetailsModal(payload) {
           <tbody>${historyRows}</tbody>
         </table>
       </div>
+    </div>
+
+    <div class="modal-section">
+      <p class="modal-text"><strong>Intelligence Sources:</strong> ${escapeHtml(sourcesText)}</p>
     </div>
   `;
 }
