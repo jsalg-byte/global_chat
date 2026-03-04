@@ -1727,9 +1727,13 @@ window.addEventListener('keydown', (event) => {
   const expectedKey = KONAMI_SEQUENCE[state.konamiIndex];
 
   if (key === expectedKey) {
+    event.preventDefault();
     state.konamiIndex += 1;
     if (state.konamiIndex === KONAMI_SEQUENCE.length) {
       state.konamiIndex = 0;
+      elements.messageInput.value = '';
+      updateMessageComposerState();
+      elements.adminPasswordInput.value = '';
       openAdminDashboard();
     }
     return;
