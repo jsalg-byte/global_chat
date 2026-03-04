@@ -171,6 +171,14 @@ function normalizeKonamiKey(key) {
   return key.length === 1 ? key.toLowerCase() : key;
 }
 
+function setAdminLockedState(isLocked) {
+  elements.adminDashboard.classList.toggle('admin-locked', isLocked);
+  elements.adminTabs.hidden = isLocked;
+  elements.adminPanels.hidden = isLocked;
+  elements.adminRefresh.hidden = isLocked;
+  elements.adminUnblock.hidden = isLocked;
+}
+
 function openAdminDashboard() {
   elements.adminDashboard.hidden = false;
   elements.adminDashboard.setAttribute('aria-hidden', 'false');
@@ -181,10 +189,7 @@ function openAdminDashboard() {
     return;
   }
 
-  elements.adminTabs.hidden = true;
-  elements.adminPanels.hidden = true;
-  elements.adminRefresh.hidden = true;
-  elements.adminUnblock.hidden = true;
+  setAdminLockedState(true);
   elements.adminPasswordInput.focus();
 }
 
@@ -414,10 +419,7 @@ async function loadAdminDashboard(password) {
     ]);
 
     state.adminPassword = password;
-    elements.adminTabs.hidden = false;
-    elements.adminPanels.hidden = false;
-    elements.adminRefresh.hidden = false;
-    elements.adminUnblock.hidden = false;
+    setAdminLockedState(false);
     renderAdminEvents(eventsPayload.events || []);
     renderAdminUsernames(usernamesPayload.usernames || []);
     renderAdminNonUsEvents(nonUsPayload.events || []);
@@ -425,10 +427,7 @@ async function loadAdminDashboard(password) {
     setAdminTab(state.adminActiveTab);
   } catch (error) {
     state.adminPassword = '';
-    elements.adminTabs.hidden = true;
-    elements.adminPanels.hidden = true;
-    elements.adminRefresh.hidden = true;
-    elements.adminUnblock.hidden = true;
+    setAdminLockedState(true);
     showAdminError(error.message || 'Unable to load dashboard.');
   } finally {
     elements.adminUnlock.disabled = false;
