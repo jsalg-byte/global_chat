@@ -926,6 +926,43 @@ function renderTypingIndicator() {
   elements.typingIndicator.textContent = `${names.join(', ')} are typing…`;
 }
 
+function upsertChannelInState(channelInput) {
+  if (!channelInput || !channelInput.slug) {
+    return null;
+  }
+
+  const existing = state.channelMap.get(channelInput.slug) || {};
+  const normalized = {
+    ...existing,
+    ...channelInput,
+    slug: channelInput.slug
+  };
+
+  const index = state.channels.findIndex((channel) => channel.slug === normalized.slug);
+  if (index >= 0) {
+    state.channels[index] = normalized;
+  } else {
+    state.channels.push(normalized);
+  }
+
+  state.channels = state.channels.filter((channel, channelIndex, all) => {
+    if (!channel?.slug) {
+      return false;
+    }
+    return all.findIndex((entry) => entry.slug === channel.slug) === channelIndex;
+  });
+
+  state.channelMap.set(normalized.slug, normalized);
+
+  if (normalized.onlineCount !== undefined && normalized.onlineCount !== null) {
+    state.onlineCounts[normalized.slug] = Number(normalized.onlineCount) || 0;
+  } else if (!(normalized.slug in state.onlineCounts)) {
+    state.onlineCounts[normalized.slug] = 0;
+  }
+
+  return normalized;
+}
+
 function queueOrSend(payload) {
   if (state.connected && state.ws && state.ws.readyState === WebSocket.OPEN) {
     state.ws.send(JSON.stringify(payload));
@@ -1089,12 +1126,8 @@ function connectWebSocket() {
     }
 
     if (payload.type === 'channel_created' && payload.channel) {
-      if (!state.channelMap.has(payload.channel.slug)) {
-        state.channels.push(payload.channel);
-        state.channelMap.set(payload.channel.slug, payload.channel);
-        state.onlineCounts[payload.channel.slug] = payload.channel.onlineCount || 0;
-        renderChannels();
-      }
+      upsertChannelInState(payload.channel);
+      renderChannels();
       return;
     }
 
@@ -1155,11 +1188,11 @@ function connectWebSocket() {
 
 async function loadChannels() {
   const result = await api('/api/channels');
-  state.channels = result.channels;
-  state.channelMap = new Map(state.channels.map((channel) => [channel.slug, channel]));
+  state.channels = [];
+  state.channelMap = new Map();
 
-  for (const channel of state.channels) {
-    state.onlineCounts[channel.slug] = channel.onlineCount || 0;
+  for (const channel of result.channels || []) {
+    upsertChannelInState(channel);
   }
 
   renderChannels();
@@ -1314,9 +1347,7 @@ elements.createChannelForm.addEventListener('submit', async (event) => {
     });
 
     const channel = result.channel;
-    state.channels.push(channel);
-    state.channelMap.set(channel.slug, channel);
-    state.onlineCounts[channel.slug] = 0;
+    upsertChannelInState(channel);
 
     renderChannels();
     elements.createChannelForm.hidden = true;
