@@ -5,24 +5,34 @@
 html,
 body {
   margin: 0;
+  height: 100%;
   min-height: 100%;
 }
 
 body {
-  background: linear-gradient(180deg, #2f75cf 0%, #1f5cac 45%, #2d7d34 100%);
+  background-image: url("https://upload.wikimedia.org/wikipedia/en/6/67/Bliss_%28Windows_XP%29.png");
+  background-size: cover;
+  background-position: center center;
+  background-repeat: no-repeat;
   background-attachment: fixed;
   font-family: Tahoma, 'Segoe UI', sans-serif;
   color: #111;
+  overflow: hidden;
 }
 
 .desktop {
-  min-height: 100vh;
+  height: 100vh;
   padding: 16px;
 }
 
 .claim-screen,
 .app-screen {
-  min-height: calc(100vh - 32px);
+  height: calc(100vh - 32px);
+}
+
+.claim-screen[hidden],
+.app-screen[hidden] {
+  display: none !important;
 }
 
 .claim-screen {
@@ -51,10 +61,15 @@ body {
 .app-window {
   width: min(1280px, 100%);
   margin: 0 auto;
+  height: 100%;
+  overflow: hidden;
 }
 
 .app-body {
   padding: 10px;
+  height: calc(100% - 28px);
+  display: flex;
+  flex-direction: column;
 }
 
 .top-strip {
@@ -73,7 +88,8 @@ body {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
   gap: 10px;
-  min-height: calc(100vh - 170px);
+  flex: 1;
+  min-height: 0;
 }
 
 .panel {
@@ -253,9 +269,33 @@ body {
 }
 
 @media (max-width: 980px) {
+  body {
+    overflow: auto;
+  }
+
+  .desktop {
+    height: auto;
+    min-height: 100vh;
+  }
+
+  .claim-screen,
+  .app-screen {
+    height: auto;
+    min-height: calc(100vh - 32px);
+  }
+
+  .app-window {
+    height: auto;
+  }
+
+  .app-body {
+    height: auto;
+  }
+
   .layout {
     grid-template-columns: 1fr;
     min-height: auto;
+    flex: initial;
   }
 
   .sidebar {
