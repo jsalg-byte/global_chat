@@ -6,6 +6,7 @@ const path = require('path');
 const { URL } = require('url');
 
 const express = require('express');
+const geoip = require('geoip-lite');
 const { Pool } = require('pg');
 const { createClient } = require('redis');
 const { WebSocketServer } = require('ws');
@@ -16,6 +17,17 @@ const REDIS_URL = process.env.REDIS_URL;
 const REDIS_PREFIX = process.env.REDIS_PREFIX || 'yungjewboii_global_chat';
 const DATABASE_SSL = process.env.DATABASE_SSL || 'false';
 const ADMIN_DASHBOARD_PASSWORD = process.env.ADMIN_DASHBOARD_PASSWORD || 'badwolf';
+const HTTP_RATE_LIMIT_WINDOW_SEC = Number(process.env.HTTP_RATE_LIMIT_WINDOW_SEC || 60);
+const HTTP_RATE_LIMIT_MAX = Number(process.env.HTTP_RATE_LIMIT_MAX || 240);
+const CLAIM_RATE_LIMIT_WINDOW_SEC = Number(process.env.CLAIM_RATE_LIMIT_WINDOW_SEC || 300);
+const CLAIM_RATE_LIMIT_MAX = Number(process.env.CLAIM_RATE_LIMIT_MAX || 12);
+const WS_MESSAGE_RATE_LIMIT_WINDOW_SEC = Number(process.env.WS_MESSAGE_RATE_LIMIT_WINDOW_SEC || 10);
+const WS_MESSAGE_RATE_LIMIT_MAX = Number(process.env.WS_MESSAGE_RATE_LIMIT_MAX || 25);
+const HONEYPOT_BLOCK_SECONDS = Number(process.env.HONEYPOT_BLOCK_SECONDS || 86400);
+const COUNTRY_BLOCKLIST = String(process.env.COUNTRY_BLOCKLIST || 'CN')
+  .split(',')
+  .map((entry) => entry.trim().toUpperCase())
+  .filter(Boolean);
 
 if (!DATABASE_URL) {
   throw new Error('Missing DATABASE_URL environment variable.');
@@ -141,6 +153,18 @@ function presenceKey(slug) {
   return `${REDIS_PREFIX}:presence:${slug}`;
 }
 
+function blockedIpKey(ipAddress) {
+  return `${REDIS_PREFIX}:blocked_ip:${ipAddress}`;
+}
+
+function botStrikeKey(ipAddress) {
+  return `${REDIS_PREFIX}:bot_strikes:${ipAddress}`;
+}
+
+function rateLimitKey(bucket, identifier) {
+  return `${REDIS_PREFIX}:rate:${bucket}:${identifier}`;
+}
+
 function fingerprintToken(token) {
   if (!token) {
     return null;
@@ -170,6 +194,121 @@ function parseIpFromForwarded(forwarded) {
     .filter(Boolean)[0];
 
   return first || null;
+}
+
+function getClientIp(req) {
+  const forwardedForRaw = req.headers['x-forwarded-for'];
+  const forwardedFor = Array.isArray(forwardedForRaw)
+    ? forwardedForRaw.join(',')
+    : forwardedForRaw || null;
+
+  return parseIpFromForwarded(forwardedFor) || req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+function normalizeIp(ipAddress) {
+  if (!ipAddress) {
+    return null;
+  }
+  const text = String(ipAddress).trim();
+  if (text.startsWith('::ffff:')) {
+    return text.slice(7);
+  }
+  return text;
+}
+
+function getCountryCodeForIp(ipAddress) {
+  const normalized = normalizeIp(ipAddress);
+  if (!normalized || normalized === 'unknown' || normalized === '::1' || normalized === '127.0.0.1') {
+    return null;
+  }
+  const found = geoip.lookup(normalized);
+  return found?.country || null;
+}
+
+function hasHoneypotPayload(req) {
+  if (!req.body || typeof req.body !== 'object') {
+    return false;
+  }
+
+  const trapValue = req.body.website || req.body.hp || req.body.honey || req.body.contact_email;
+  return typeof trapValue === 'string' && trapValue.trim().length > 0;
+}
+
+function isSuspiciousPath(pathValue) {
+  const pathText = String(pathValue || '').toLowerCase();
+  const patterns = [
+    '/wp-admin',
+    '/wp-login',
+    '/xmlrpc.php',
+    '/phpmyadmin',
+    '/.env',
+    '/vendor/phpunit',
+    '/autodiscover',
+    '/boaform',
+    '/actuator',
+    '/hudson',
+    '/jenkins'
+  ];
+  return patterns.some((pattern) => pathText.includes(pattern));
+}
+
+function isSuspiciousUserAgent(userAgent) {
+  const ua = String(userAgent || '').toLowerCase();
+  if (!ua) {
+    return false;
+  }
+
+  const patterns = [
+    'sqlmap',
+    'nikto',
+    'masscan',
+    'nmap',
+    'acunetix',
+    'nessus',
+    'zgrab',
+    'python-requests',
+    'scrapy',
+    'httpclient',
+    'go-http-client',
+    'curl/',
+    'wget/'
+  ];
+
+  return patterns.some((pattern) => ua.includes(pattern));
+}
+
+async function consumeRateLimit(bucket, identifier, windowSec, maxRequests) {
+  const key = rateLimitKey(bucket, identifier);
+  const results = await redisPublisher
+    .multi()
+    .incr(key)
+    .expire(key, windowSec, 'NX')
+    .ttl(key)
+    .exec();
+
+  const count = Number(results?.[0] || 0);
+  const ttl = Number(results?.[2] || windowSec);
+
+  return {
+    allowed: count <= maxRequests,
+    count,
+    ttl
+  };
+}
+
+async function blockIp(ipAddress, seconds, reason) {
+  if (!ipAddress || ipAddress === 'unknown') {
+    return;
+  }
+  await redisPublisher.set(blockedIpKey(ipAddress), reason || 'blocked', { EX: seconds });
+}
+
+async function isIpBlocked(ipAddress) {
+  if (!ipAddress || ipAddress === 'unknown') {
+    return false;
+  }
+  const value = await redisPublisher.get(blockedIpKey(ipAddress));
+  return Boolean(value);
 }
 
 function sanitizeHeaders(headers) {
@@ -348,10 +487,10 @@ function buildWsEvent(req, extras = {}) {
     ipAddress: parseIpFromForwarded(forwardedFor) || req.socket?.remoteAddress || null,
     forwardedFor: trimValue(forwardedFor, 512),
     remoteAddress: req.socket?.remoteAddress || null,
-    method: 'WS',
-    path: req.url,
-    statusCode: null,
-    durationMs: null,
+    method: extras.method || 'WS',
+    path: extras.path || req.url,
+    statusCode: extras.statusCode ?? null,
+    durationMs: extras.durationMs ?? null,
     username: extras.username || null,
     usernameKey: extras.usernameKey || null,
     userAgent: trimValue(req.headers['user-agent'], 1024),
@@ -363,7 +502,7 @@ function buildWsEvent(req, extras = {}) {
     secChUaPlatform: trimValue(req.headers['sec-ch-ua-platform'], 256),
     tokenFingerprint: fingerprintToken(extras.token || null),
     headers: sanitizeHeaders(req.headers),
-    body: null,
+    body: extras.body ?? null,
     meta: extras.meta || null
   };
 }
@@ -386,6 +525,73 @@ app.use((req, res, next) => {
   });
 
   next();
+});
+
+app.use(async (req, res, next) => {
+  try {
+    const clientIp = getClientIp(req);
+    const countryCode = getCountryCodeForIp(clientIp);
+
+    if (await isIpBlocked(clientIp)) {
+      res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
+      return;
+    }
+
+    if (countryCode && COUNTRY_BLOCKLIST.includes(countryCode)) {
+      queueSiteEvent(
+        buildHttpEvent(req, {
+          eventType: 'country_blocked',
+          statusCode: 403,
+          meta: {
+            countryCode,
+            countryBlocklist: COUNTRY_BLOCKLIST
+          }
+        })
+      );
+      res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
+      return;
+    }
+
+    const suspiciousUa = isSuspiciousUserAgent(req.headers['user-agent']);
+    const suspiciousPath = isSuspiciousPath(req.originalUrl);
+
+    if (suspiciousUa || suspiciousPath) {
+      const strikes = Number(await redisPublisher.incr(botStrikeKey(clientIp)));
+      await redisPublisher.expire(botStrikeKey(clientIp), 86400, 'NX');
+
+      if (suspiciousPath || strikes >= 2) {
+        await blockIp(clientIp, HONEYPOT_BLOCK_SECONDS, 'bot_filtered');
+
+        queueSiteEvent(
+          buildHttpEvent(req, {
+            eventType: 'bot_filtered',
+            statusCode: 403,
+            meta: {
+              suspiciousUa,
+              suspiciousPath,
+              strikes
+            }
+          })
+        );
+
+        res.status(403).json({ error: 'forbidden', message: 'Bot traffic blocked.' });
+        return;
+      }
+    }
+
+    if (req.path.startsWith('/api/')) {
+      const rate = await consumeRateLimit('http_api', clientIp, HTTP_RATE_LIMIT_WINDOW_SEC, HTTP_RATE_LIMIT_MAX);
+      if (!rate.allowed) {
+        res.setHeader('Retry-After', String(Math.max(rate.ttl, 1)));
+        res.status(429).json({ error: 'rate_limited', message: 'Too many requests. Slow down.' });
+        return;
+      }
+    }
+
+    next();
+  } catch (error) {
+    next(error);
+  }
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
@@ -594,6 +800,32 @@ async function handleRedisEvent(message) {
 }
 
 app.post('/api/claim', async (req, res, next) => {
+  const clientIp = getClientIp(req);
+
+  if (hasHoneypotPayload(req)) {
+    await blockIp(clientIp, HONEYPOT_BLOCK_SECONDS, 'honeypot_payload').catch(() => {});
+
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'honeypot_payload',
+        statusCode: 400,
+        meta: {
+          blockedSeconds: HONEYPOT_BLOCK_SECONDS
+        }
+      })
+    );
+
+    res.status(400).json({ error: 'invalid_request', message: 'Invalid request.' });
+    return;
+  }
+
+  const claimRate = await consumeRateLimit('claim', clientIp, CLAIM_RATE_LIMIT_WINDOW_SEC, CLAIM_RATE_LIMIT_MAX);
+  if (!claimRate.allowed) {
+    res.setHeader('Retry-After', String(Math.max(claimRate.ttl, 1)));
+    res.status(429).json({ error: 'rate_limited', message: 'Too many claim attempts. Try again later.' });
+    return;
+  }
+
   const requested = typeof req.body?.username === 'string' ? req.body.username.trim() : '';
 
   if (!USERNAME_REGEX.test(requested)) {
@@ -866,6 +1098,27 @@ app.get('/api/admin/events', async (req, res, next) => {
   }
 });
 
+app.all('/__trap__', async (req, res, next) => {
+  try {
+    const clientIp = getClientIp(req);
+    await blockIp(clientIp, HONEYPOT_BLOCK_SECONDS, 'honeypot_triggered');
+
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'honeypot_triggered',
+        statusCode: 403,
+        meta: {
+          blockedSeconds: HONEYPOT_BLOCK_SECONDS
+        }
+      })
+    );
+
+    res.status(403).send('Forbidden');
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -879,6 +1132,19 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: '/ws' });
 
 wss.on('connection', async (ws, req) => {
+  const wsIp = getClientIp(req);
+
+  if (await isIpBlocked(wsIp)) {
+    ws.close(4403, 'forbidden');
+    return;
+  }
+
+  const wsConnectRate = await consumeRateLimit('ws_connect', wsIp, 60, 80).catch(() => ({ allowed: true }));
+  if (!wsConnectRate.allowed) {
+    ws.close(4408, 'rate limited');
+    return;
+  }
+
   const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
   const token = url.searchParams.get('token');
 
@@ -899,6 +1165,7 @@ wss.on('connection', async (ws, req) => {
     token,
     username: session.username,
     usernameKey: session.username_key,
+    ipAddress: wsIp,
     channel: null,
     connectionId: crypto.randomUUID(),
     presenceMember: null
@@ -1002,6 +1269,18 @@ wss.on('connection', async (ws, req) => {
           return;
         }
 
+        const wsRateIdentifier = `${localMeta.usernameKey || localMeta.ipAddress || 'unknown'}:${channel}`;
+        const wsMessageRate = await consumeRateLimit(
+          'ws_message',
+          wsRateIdentifier,
+          WS_MESSAGE_RATE_LIMIT_WINDOW_SEC,
+          WS_MESSAGE_RATE_LIMIT_MAX
+        );
+        if (!wsMessageRate.allowed) {
+          sendJson(ws, { type: 'error', message: 'You are sending too fast. Slow down.' });
+          return;
+        }
+
         const message = {
           id: crypto.randomUUID(),
           channel,
@@ -1019,6 +1298,23 @@ wss.on('connection', async (ws, req) => {
         );
 
         const messagePayload = { type: 'message', ...message };
+
+        queueSiteEvent(
+          buildWsEvent(req, {
+            eventType: 'ws_message_sent',
+            token,
+            username: localMeta.username,
+            usernameKey: localMeta.usernameKey,
+            path: `/ws/channels/${channel}`,
+            body: {
+              text
+            },
+            meta: {
+              messageId: message.id,
+              textLength: text.length
+            }
+          })
+        );
 
         broadcastChannel(channel, messagePayload);
         await publishEvent('message', messagePayload);

@@ -63,6 +63,16 @@ body {
   margin: 8px 0 0;
 }
 
+.honeypot-field,
+.honeypot-link {
+  position: absolute !important;
+  left: -99999px !important;
+  width: 1px !important;
+  height: 1px !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
 .app-window {
   width: min(1280px, 100%);
   margin: 0 auto;

@@ -12,6 +12,14 @@ Copy `.env.example` values into your local `.env` or Coolify dashboard:
 - `REDIS_PREFIX`
 - `NODE_ENV`
 - `ADMIN_DASHBOARD_PASSWORD` (defaults to `badwolf`)
+- `HTTP_RATE_LIMIT_WINDOW_SEC`
+- `HTTP_RATE_LIMIT_MAX`
+- `CLAIM_RATE_LIMIT_WINDOW_SEC`
+- `CLAIM_RATE_LIMIT_MAX`
+- `WS_MESSAGE_RATE_LIMIT_WINDOW_SEC`
+- `WS_MESSAGE_RATE_LIMIT_MAX`
+- `HONEYPOT_BLOCK_SECONDS`
+- `COUNTRY_BLOCKLIST` (default `CN`)
 
 ## Run
 
@@ -30,6 +38,9 @@ Open: http://localhost:3000
 - Site/WS event telemetry is stored in Postgres (`site_events`) and viewable from the Konami dashboard.
   - Trigger: `↑ ↑ ↓ ↓ ← → ← → B A`
   - Password: `ADMIN_DASHBOARD_PASSWORD` (default `badwolf`)
+- Redis-backed rate limiting and bot filtering are enabled for API traffic and WebSocket message sends.
+- Honeypot trap endpoint: `/__trap__` (triggered by hidden link and honeypot payloads).
+- Country-level IP blocking is enabled via `COUNTRY_BLOCKLIST` (ISO country codes, comma-separated).
 
 ## Implemented v1 Scope
 

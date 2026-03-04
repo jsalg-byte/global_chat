@@ -26,6 +26,7 @@ const elements = {
   claimScreen: document.getElementById('claim-screen'),
   appScreen: document.getElementById('app-screen'),
   claimForm: document.getElementById('claim-form'),
+  claimHoneypot: document.getElementById('claim-website'),
   claimUsername: document.getElementById('claim-username'),
   claimSubmit: document.getElementById('claim-submit'),
   claimError: document.getElementById('claim-error'),
@@ -674,6 +675,7 @@ elements.claimForm.addEventListener('submit', async (event) => {
   event.preventDefault();
 
   const requested = elements.claimUsername.value.trim();
+  const website = elements.claimHoneypot.value.trim();
 
   if (!USERNAME_REGEX.test(requested)) {
     showClaimError('3–24 characters, letters/numbers/underscores only.');
@@ -686,7 +688,7 @@ elements.claimForm.addEventListener('submit', async (event) => {
   try {
     const result = await api('/api/claim', {
       method: 'POST',
-      body: JSON.stringify({ username: requested })
+      body: JSON.stringify({ username: requested, website })
     });
 
     state.token = result.token;

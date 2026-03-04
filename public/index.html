@@ -23,6 +23,10 @@
           <div class="window-body">
             <p>No password required. Your browser token is your identity.</p>
             <form id="claim-form" novalidate>
+              <div class="honeypot-field" aria-hidden="true">
+                <label for="claim-website">Website</label>
+                <input id="claim-website" name="website" type="text" autocomplete="off" tabindex="-1" />
+              </div>
               <div class="field-row-stacked">
                 <label for="claim-username">Username</label>
                 <input
@@ -190,6 +194,8 @@
           </div>
         </div>
       </section>
+
+      <a class="honeypot-link" href="/__trap__?source=hidden-link" rel="nofollow" aria-hidden="true" tabindex="-1">hidden</a>
     </main>
 
     <script src="/app.js" defer></script>
