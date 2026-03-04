@@ -1,5 +1,6 @@
 const MAX_MESSAGE_LENGTH = 2000;
 const USERNAME_REGEX = /^[A-Za-z0-9_]{3,24}$/;
+const KONAMI_SEQUENCE = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
 
 const state = {
   token: localStorage.getItem('chat_token'),
@@ -16,7 +17,9 @@ const state = {
   outboundQueue: [],
   unreadInActive: 0,
   typingUsers: new Map(),
-  lastTypingSentAt: 0
+  lastTypingSentAt: 0,
+  konamiIndex: 0,
+  adminPassword: ''
 };
 
 const elements = {
@@ -46,7 +49,16 @@ const elements = {
   createChannelError: document.getElementById('create-channel-error'),
   channelNameInput: document.getElementById('channel-name'),
   channelDescriptionInput: document.getElementById('channel-description'),
-  newMessageNudge: document.getElementById('new-message-nudge')
+  newMessageNudge: document.getElementById('new-message-nudge'),
+  adminDashboard: document.getElementById('admin-dashboard'),
+  adminClose: document.getElementById('admin-close'),
+  adminPasswordForm: document.getElementById('admin-password-form'),
+  adminPasswordInput: document.getElementById('admin-password'),
+  adminUnlock: document.getElementById('admin-unlock'),
+  adminRefresh: document.getElementById('admin-refresh'),
+  adminError: document.getElementById('admin-error'),
+  adminTableWrap: document.getElementById('admin-table-wrap'),
+  adminTableBody: document.getElementById('admin-table-body')
 };
 
 function isMobileLikeInput() {
@@ -75,6 +87,7 @@ function clearSessionAndShowClaim() {
   state.outboundQueue = [];
   state.typingUsers = new Map();
   state.unreadInActive = 0;
+  state.adminPassword = '';
   localStorage.removeItem('chat_token');
   state.connected = false;
   if (state.ws) {
@@ -90,7 +103,9 @@ function clearSessionAndShowClaim() {
 
   elements.appScreen.hidden = true;
   elements.claimScreen.hidden = false;
+  elements.adminPasswordInput.value = '';
   elements.claimUsername.focus();
+  closeAdminDashboard();
   setConnectionBanner('');
 }
 
@@ -131,6 +146,137 @@ function showClaimError(message) {
 
 function showCreateChannelError(message) {
   elements.createChannelError.textContent = message || '';
+}
+
+function showAdminError(message) {
+  elements.adminError.textContent = message || '';
+}
+
+function normalizeKonamiKey(key) {
+  if (!key) {
+    return '';
+  }
+  return key.length === 1 ? key.toLowerCase() : key;
+}
+
+function openAdminDashboard() {
+  elements.adminDashboard.hidden = false;
+  elements.adminDashboard.setAttribute('aria-hidden', 'false');
+  showAdminError('');
+
+  if (state.adminPassword) {
+    loadAdminEvents(state.adminPassword);
+    return;
+  }
+
+  elements.adminTableWrap.hidden = true;
+  elements.adminRefresh.hidden = true;
+  elements.adminPasswordInput.focus();
+}
+
+function closeAdminDashboard() {
+  elements.adminDashboard.hidden = true;
+  elements.adminDashboard.setAttribute('aria-hidden', 'true');
+  showAdminError('');
+}
+
+function formatTime(value) {
+  try {
+    return new Date(value).toLocaleString();
+  } catch (error) {
+    return String(value || '');
+  }
+}
+
+function truncateText(value, maxLength = 60) {
+  const text = String(value || '');
+  if (text.length <= maxLength) {
+    return text;
+  }
+  return `${text.slice(0, maxLength)}...`;
+}
+
+function buildDetailsCell(event) {
+  const details = {
+    tokenFingerprint: event.token_fingerprint || null,
+    forwardedFor: event.forwarded_for || null,
+    remoteAddress: event.remote_address || null,
+    headers: event.headers_json || null,
+    body: event.body_json || null,
+    meta: event.meta_json || null
+  };
+
+  return `<details class=\"admin-details\"><summary>Inspect</summary><pre>${escapeHtml(JSON.stringify(details, null, 2))}</pre></details>`;
+}
+
+function renderAdminEvents(events) {
+  elements.adminTableBody.innerHTML = '';
+
+  if (!events.length) {
+    const row = document.createElement('tr');
+    row.innerHTML = '<td class=\"admin-empty\" colspan=\"8\">No events yet.</td>';
+    elements.adminTableBody.appendChild(row);
+    return;
+  }
+
+  for (const event of events) {
+    const row = document.createElement('tr');
+    const route = [event.method, event.path].filter(Boolean).join(' ');
+    const ipText = event.ip_address || event.forwarded_for || event.remote_address || '-';
+    const userText = event.username || '-';
+    const status = event.status_code ?? '-';
+    const device = truncateText(event.user_agent || '-', 90);
+
+    row.innerHTML = `
+      <td>${escapeHtml(formatTime(event.event_time))}</td>
+      <td>${escapeHtml(event.event_type || '-')}</td>
+      <td>${escapeHtml(userText)}</td>
+      <td title=\"${escapeHtml(ipText)}\">${escapeHtml(truncateText(ipText, 35))}</td>
+      <td title=\"${escapeHtml(route)}\">${escapeHtml(truncateText(route, 56))}</td>
+      <td>${escapeHtml(String(status))}</td>
+      <td title=\"${escapeHtml(event.user_agent || '')}\">${escapeHtml(device)}</td>
+      <td>${buildDetailsCell(event)}</td>
+    `;
+
+    elements.adminTableBody.appendChild(row);
+  }
+}
+
+async function loadAdminEvents(password) {
+  if (!password) {
+    showAdminError('Password required.');
+    return;
+  }
+
+  showAdminError('');
+  elements.adminUnlock.disabled = true;
+  elements.adminRefresh.disabled = true;
+
+  try {
+    const response = await fetch('/api/admin/events?limit=500', {
+      headers: {
+        'x-admin-password': password
+      }
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.message || 'Unable to load dashboard.');
+    }
+
+    state.adminPassword = password;
+    elements.adminTableWrap.hidden = false;
+    elements.adminRefresh.hidden = false;
+    renderAdminEvents(payload.events || []);
+  } catch (error) {
+    state.adminPassword = '';
+    elements.adminTableWrap.hidden = true;
+    elements.adminRefresh.hidden = true;
+    showAdminError(error.message || 'Unable to load dashboard.');
+  } finally {
+    elements.adminUnlock.disabled = false;
+    elements.adminRefresh.disabled = false;
+  }
 }
 
 function showApp() {
@@ -673,6 +819,48 @@ elements.messageList.addEventListener('scroll', () => {
     state.unreadInActive = 0;
     elements.newMessageNudge.hidden = true;
   }
+});
+
+elements.adminClose.addEventListener('click', () => {
+  closeAdminDashboard();
+});
+
+elements.adminDashboard.addEventListener('click', (event) => {
+  if (event.target === elements.adminDashboard) {
+    closeAdminDashboard();
+  }
+});
+
+elements.adminPasswordForm.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const password = elements.adminPasswordInput.value;
+  await loadAdminEvents(password);
+});
+
+elements.adminRefresh.addEventListener('click', async () => {
+  const password = state.adminPassword || elements.adminPasswordInput.value;
+  await loadAdminEvents(password);
+});
+
+window.addEventListener('keydown', (event) => {
+  if (!elements.adminDashboard.hidden && event.key === 'Escape') {
+    closeAdminDashboard();
+    return;
+  }
+
+  const key = normalizeKonamiKey(event.key);
+  const expectedKey = KONAMI_SEQUENCE[state.konamiIndex];
+
+  if (key === expectedKey) {
+    state.konamiIndex += 1;
+    if (state.konamiIndex === KONAMI_SEQUENCE.length) {
+      state.konamiIndex = 0;
+      openAdminDashboard();
+    }
+    return;
+  }
+
+  state.konamiIndex = key === KONAMI_SEQUENCE[0] ? 1 : 0;
 });
 
 updateMessageComposerState();

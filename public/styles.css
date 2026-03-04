@@ -35,7 +35,8 @@ body {
 }
 
 .claim-screen[hidden],
-.app-screen[hidden] {
+.app-screen[hidden],
+.admin-dashboard[hidden] {
   display: none !important;
 }
 
@@ -260,6 +261,84 @@ body {
   box-shadow: 1px 1px 0 #fff inset, -1px -1px 0 #404040 inset;
 }
 
+.admin-dashboard {
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: grid;
+  place-items: center;
+  background: rgba(0, 0, 0, 0.5);
+  padding: 12px;
+}
+
+.admin-window {
+  width: min(1200px, 96vw);
+  height: min(82vh, 900px);
+  display: flex;
+  flex-direction: column;
+}
+
+.admin-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  height: calc(100% - 28px);
+}
+
+.admin-password-form {
+  margin: 0;
+}
+
+.admin-table-wrap {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid #7f9db9;
+  background: #fff;
+}
+
+.admin-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+}
+
+.admin-table th,
+.admin-table td {
+  border: 1px solid #b7b7b7;
+  padding: 4px 6px;
+  text-align: left;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.admin-table thead th {
+  position: sticky;
+  top: 0;
+  background: #ebebeb;
+  z-index: 1;
+}
+
+.admin-empty {
+  text-align: center;
+  color: #666;
+}
+
+.admin-details {
+  margin: 0;
+}
+
+.admin-details pre {
+  margin: 4px 0 0;
+  max-height: 140px;
+  overflow: auto;
+  background: #f2f2f2;
+  border: 1px solid #d0d0d0;
+  padding: 6px;
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
@@ -300,6 +379,15 @@ body {
     grid-template-columns: 1fr;
     min-height: auto;
     flex: initial;
+  }
+
+  .admin-window {
+    width: 100%;
+    height: min(88vh, 1100px);
+  }
+
+  .admin-table {
+    font-size: 11px;
   }
 
   input,

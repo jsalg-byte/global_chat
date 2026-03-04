@@ -11,6 +11,7 @@ Copy `.env.example` values into your local `.env` or Coolify dashboard:
 - `REDIS_URL`
 - `REDIS_PREFIX`
 - `NODE_ENV`
+- `ADMIN_DASHBOARD_PASSWORD` (defaults to `badwolf`)
 
 ## Run
 
@@ -26,6 +27,9 @@ Open: http://localhost:3000
 - Postgres stores usernames, session tokens, channels, and durable messages.
 - Redis stores live presence sets and propagates real-time events across instances via pub/sub.
 - WebSocket fanout remains channel-based.
+- Site/WS event telemetry is stored in Postgres (`site_events`) and viewable from the Konami dashboard.
+  - Trigger: `↑ ↑ ↓ ↓ ← → ← → B A`
+  - Password: `ADMIN_DASHBOARD_PASSWORD` (default `badwolf`)
 
 ## Implemented v1 Scope
 

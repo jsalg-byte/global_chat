@@ -15,6 +15,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const REDIS_URL = process.env.REDIS_URL;
 const REDIS_PREFIX = process.env.REDIS_PREFIX || 'yungjewboii_global_chat';
 const DATABASE_SSL = process.env.DATABASE_SSL || 'false';
+const ADMIN_DASHBOARD_PASSWORD = process.env.ADMIN_DASHBOARD_PASSWORD || 'badwolf';
 
 if (!DATABASE_URL) {
   throw new Error('Missing DATABASE_URL environment variable.');
@@ -32,8 +33,8 @@ const INSTANCE_ID = crypto.randomUUID();
 const EVENTS_CHANNEL = `${REDIS_PREFIX}:events`;
 
 const app = express();
-app.use(express.json({ limit: '16kb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.set('trust proxy', true);
+app.use(express.json({ limit: '64kb' }));
 
 function parseBoolean(value, defaultValue = false) {
   if (value === undefined || value === null || value === '') {
@@ -139,6 +140,255 @@ function broadcastChannel(slug, payload, exceptWs = null) {
 function presenceKey(slug) {
   return `${REDIS_PREFIX}:presence:${slug}`;
 }
+
+function fingerprintToken(token) {
+  if (!token) {
+    return null;
+  }
+  return crypto.createHash('sha256').update(token).digest('hex').slice(0, 24);
+}
+
+function trimValue(value, max = 512) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const text = String(value);
+  if (text.length <= max) {
+    return text;
+  }
+  return `${text.slice(0, max)}...`;
+}
+
+function parseIpFromForwarded(forwarded) {
+  if (!forwarded || typeof forwarded !== 'string') {
+    return null;
+  }
+
+  const first = forwarded
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)[0];
+
+  return first || null;
+}
+
+function sanitizeHeaders(headers) {
+  const blocked = new Set(['authorization', 'cookie', 'x-admin-password']);
+  const safe = {};
+
+  for (const [key, value] of Object.entries(headers || {})) {
+    const lower = key.toLowerCase();
+    if (blocked.has(lower)) {
+      continue;
+    }
+
+    if (Array.isArray(value)) {
+      safe[lower] = value.map((entry) => trimValue(entry, 512));
+    } else {
+      safe[lower] = trimValue(value, 512);
+    }
+  }
+
+  return safe;
+}
+
+function sanitizeBody(body) {
+  if (!body || typeof body !== 'object') {
+    return null;
+  }
+
+  const json = JSON.stringify(body);
+  if (!json) {
+    return null;
+  }
+
+  if (json.length <= 4000) {
+    return JSON.parse(json);
+  }
+
+  return {
+    truncated: true,
+    preview: `${json.slice(0, 4000)}...`
+  };
+}
+
+async function insertSiteEvent(event) {
+  const eventId = crypto.randomUUID();
+  await pool.query(
+    `
+      INSERT INTO site_events (
+        id,
+        event_type,
+        event_time,
+        instance_id,
+        ip_address,
+        forwarded_for,
+        remote_address,
+        method,
+        path,
+        status_code,
+        duration_ms,
+        username,
+        username_key,
+        user_agent,
+        referer,
+        origin,
+        accept_language,
+        sec_ch_ua,
+        sec_ch_ua_mobile,
+        sec_ch_ua_platform,
+        token_fingerprint,
+        headers_json,
+        body_json,
+        meta_json
+      )
+      VALUES (
+        $1,
+        $2,
+        COALESCE($3::timestamptz, NOW()),
+        $4,
+        $5,
+        $6,
+        $7,
+        $8,
+        $9,
+        $10,
+        $11,
+        $12,
+        $13,
+        $14,
+        $15,
+        $16,
+        $17,
+        $18,
+        $19,
+        $20,
+        $21,
+        $22::jsonb,
+        $23::jsonb,
+        $24::jsonb
+      )
+    `,
+    [
+      eventId,
+      event.eventType,
+      event.eventTime || null,
+      INSTANCE_ID,
+      event.ipAddress || null,
+      event.forwardedFor || null,
+      event.remoteAddress || null,
+      event.method || null,
+      event.path || null,
+      event.statusCode ?? null,
+      event.durationMs ?? null,
+      event.username || null,
+      event.usernameKey || null,
+      event.userAgent || null,
+      event.referer || null,
+      event.origin || null,
+      event.acceptLanguage || null,
+      event.secChUa || null,
+      event.secChUaMobile || null,
+      event.secChUaPlatform || null,
+      event.tokenFingerprint || null,
+      JSON.stringify(event.headers || null),
+      JSON.stringify(event.body || null),
+      JSON.stringify(event.meta || null)
+    ]
+  );
+}
+
+function queueSiteEvent(event) {
+  insertSiteEvent(event).catch((error) => {
+    console.error('Failed to insert site event:', error);
+  });
+}
+
+function buildHttpEvent(req, extras = {}) {
+  const forwardedForRaw = req.headers['x-forwarded-for'];
+  const forwardedFor = Array.isArray(forwardedForRaw)
+    ? forwardedForRaw.join(',')
+    : forwardedForRaw || null;
+
+  return {
+    eventType: extras.eventType || 'http_request',
+    eventTime: extras.eventTime || nowIso(),
+    ipAddress: parseIpFromForwarded(forwardedFor) || req.ip || null,
+    forwardedFor: trimValue(forwardedFor, 512),
+    remoteAddress: req.socket?.remoteAddress || null,
+    method: req.method,
+    path: req.originalUrl,
+    statusCode: extras.statusCode ?? null,
+    durationMs: extras.durationMs ?? null,
+    username: extras.username || req.auth?.username || null,
+    usernameKey: extras.usernameKey || req.auth?.usernameKey || null,
+    userAgent: trimValue(req.headers['user-agent'], 1024),
+    referer: trimValue(req.headers.referer || req.headers.referrer, 1024),
+    origin: trimValue(req.headers.origin, 1024),
+    acceptLanguage: trimValue(req.headers['accept-language'], 1024),
+    secChUa: trimValue(req.headers['sec-ch-ua'], 1024),
+    secChUaMobile: trimValue(req.headers['sec-ch-ua-mobile'], 256),
+    secChUaPlatform: trimValue(req.headers['sec-ch-ua-platform'], 256),
+    tokenFingerprint: fingerprintToken(getTokenFromRequest(req)),
+    headers: sanitizeHeaders(req.headers),
+    body: extras.bodyOverride !== undefined ? extras.bodyOverride : sanitizeBody(req.body),
+    meta: extras.meta || null
+  };
+}
+
+function buildWsEvent(req, extras = {}) {
+  const forwardedForRaw = req.headers['x-forwarded-for'];
+  const forwardedFor = Array.isArray(forwardedForRaw)
+    ? forwardedForRaw.join(',')
+    : forwardedForRaw || null;
+
+  return {
+    eventType: extras.eventType,
+    eventTime: nowIso(),
+    ipAddress: parseIpFromForwarded(forwardedFor) || req.socket?.remoteAddress || null,
+    forwardedFor: trimValue(forwardedFor, 512),
+    remoteAddress: req.socket?.remoteAddress || null,
+    method: 'WS',
+    path: req.url,
+    statusCode: null,
+    durationMs: null,
+    username: extras.username || null,
+    usernameKey: extras.usernameKey || null,
+    userAgent: trimValue(req.headers['user-agent'], 1024),
+    referer: trimValue(req.headers.referer || req.headers.referrer, 1024),
+    origin: trimValue(req.headers.origin, 1024),
+    acceptLanguage: trimValue(req.headers['accept-language'], 1024),
+    secChUa: trimValue(req.headers['sec-ch-ua'], 1024),
+    secChUaMobile: trimValue(req.headers['sec-ch-ua-mobile'], 256),
+    secChUaPlatform: trimValue(req.headers['sec-ch-ua-platform'], 256),
+    tokenFingerprint: fingerprintToken(extras.token || null),
+    headers: sanitizeHeaders(req.headers),
+    body: null,
+    meta: extras.meta || null
+  };
+}
+
+app.use((req, res, next) => {
+  const startedAt = Date.now();
+
+  res.on('finish', () => {
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'http_request',
+        statusCode: res.statusCode,
+        durationMs: Date.now() - startedAt,
+        meta: {
+          protocol: req.protocol,
+          host: req.headers.host || null
+        }
+      })
+    );
+  });
+
+  next();
+});
+
+app.use(express.static(path.join(__dirname, 'public')));
 
 async function publishEvent(type, payload) {
   await redisPublisher.publish(
@@ -384,6 +634,17 @@ app.post('/api/claim', async (req, res, next) => {
 
     await client.query('COMMIT');
 
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'username_claimed',
+        username: requested,
+        usernameKey,
+        meta: {
+          claimSuccess: true
+        }
+      })
+    );
+
     res.status(201).json({ token, username: requested });
   } catch (error) {
     await client.query('ROLLBACK');
@@ -394,6 +655,17 @@ app.post('/api/claim', async (req, res, next) => {
 });
 
 app.get('/api/session', requireAuth, (req, res) => {
+  queueSiteEvent(
+    buildHttpEvent(req, {
+      eventType: 'session_validated',
+      username: req.auth.username,
+      usernameKey: req.auth.usernameKey,
+      meta: {
+        autoLogin: true
+      }
+    })
+  );
+
   res.json({ username: req.auth.username });
 });
 
@@ -407,6 +679,17 @@ app.post('/api/release', requireAuth, async (req, res, next) => {
     await client.query('DELETE FROM user_claims WHERE username_key = $1', [req.auth.usernameKey]);
 
     await client.query('COMMIT');
+
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'username_released',
+        username: req.auth.username,
+        usernameKey: req.auth.usernameKey,
+        meta: {
+          releasedByUser: true
+        }
+      })
+    );
 
     for (const [ws, meta] of wsClients.entries()) {
       if (meta.token === req.auth.token) {
@@ -532,6 +815,57 @@ app.get('/api/channels/:slug/messages', requireAuth, async (req, res, next) => {
   }
 });
 
+app.get('/api/admin/events', async (req, res, next) => {
+  const providedPassword = String(req.headers['x-admin-password'] || '');
+  if (providedPassword !== ADMIN_DASHBOARD_PASSWORD) {
+    res.status(401).json({ error: 'unauthorized', message: 'Invalid admin password.' });
+    return;
+  }
+
+  const limitRaw = Number(req.query.limit || 250);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(1000, Math.floor(limitRaw))) : 250;
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          id,
+          event_type,
+          event_time,
+          ip_address,
+          forwarded_for,
+          remote_address,
+          method,
+          path,
+          status_code,
+          duration_ms,
+          username,
+          username_key,
+          user_agent,
+          referer,
+          origin,
+          accept_language,
+          sec_ch_ua,
+          sec_ch_ua_mobile,
+          sec_ch_ua_platform,
+          token_fingerprint,
+          headers_json,
+          body_json,
+          meta_json,
+          instance_id
+        FROM site_events
+        ORDER BY event_time DESC
+        LIMIT $1
+      `,
+      [limit]
+    );
+
+    res.json({ events: result.rows });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.use((req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
@@ -571,6 +905,18 @@ wss.on('connection', async (ws, req) => {
   };
 
   wsClients.set(ws, meta);
+
+  queueSiteEvent(
+    buildWsEvent(req, {
+      eventType: 'ws_connected',
+      token,
+      username: session.username,
+      usernameKey: session.username_key,
+      meta: {
+        connectionId: meta.connectionId
+      }
+    })
+  );
 
   let counts = {};
   try {
@@ -687,6 +1033,18 @@ wss.on('connection', async (ws, req) => {
   });
 
   ws.on('close', () => {
+    queueSiteEvent(
+      buildWsEvent(req, {
+        eventType: 'ws_disconnected',
+        token,
+        username: meta.username,
+        usernameKey: meta.usernameKey,
+        meta: {
+          connectionId: meta.connectionId
+        }
+      })
+    );
+
     detachFromChannel(ws, 'disconnect')
       .catch((error) => console.error('WebSocket close handler error:', error))
       .finally(() => {
@@ -695,6 +1053,18 @@ wss.on('connection', async (ws, req) => {
   });
 
   ws.on('error', () => {
+    queueSiteEvent(
+      buildWsEvent(req, {
+        eventType: 'ws_error',
+        token,
+        username: meta.username,
+        usernameKey: meta.usernameKey,
+        meta: {
+          connectionId: meta.connectionId
+        }
+      })
+    );
+
     detachFromChannel(ws, 'disconnect')
       .catch((error) => console.error('WebSocket error handler error:', error))
       .finally(() => {
@@ -740,8 +1110,47 @@ async function initDatabase() {
   `);
 
   await pool.query(`
+    CREATE TABLE IF NOT EXISTS site_events (
+      id UUID PRIMARY KEY,
+      event_type TEXT NOT NULL,
+      event_time TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      instance_id TEXT NOT NULL,
+      ip_address TEXT,
+      forwarded_for TEXT,
+      remote_address TEXT,
+      method TEXT,
+      path TEXT,
+      status_code INTEGER,
+      duration_ms INTEGER,
+      username TEXT,
+      username_key TEXT,
+      user_agent TEXT,
+      referer TEXT,
+      origin TEXT,
+      accept_language TEXT,
+      sec_ch_ua TEXT,
+      sec_ch_ua_mobile TEXT,
+      sec_ch_ua_platform TEXT,
+      token_fingerprint TEXT,
+      headers_json JSONB,
+      body_json JSONB,
+      meta_json JSONB
+    );
+  `);
+
+  await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_messages_channel_created_at
     ON messages(channel_slug, created_at DESC);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_site_events_time
+    ON site_events(event_time DESC);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_site_events_event_type
+    ON site_events(event_type);
   `);
 
   await pool.query(

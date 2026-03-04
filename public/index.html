@@ -148,6 +148,48 @@
           </div>
         </div>
       </section>
+
+      <section id="admin-dashboard" class="admin-dashboard" hidden aria-hidden="true">
+        <div class="window admin-window" role="dialog" aria-modal="true" aria-labelledby="admin-title">
+          <div class="title-bar">
+            <div class="title-bar-text" id="admin-title">Telemetry Dashboard</div>
+            <div class="title-bar-controls">
+              <button id="admin-close" aria-label="Close" type="button"></button>
+            </div>
+          </div>
+          <div class="window-body admin-body">
+            <form id="admin-password-form" class="admin-password-form">
+              <div class="field-row-stacked">
+                <label for="admin-password">Dashboard password</label>
+                <input id="admin-password" type="password" autocomplete="off" placeholder="Enter password" required />
+              </div>
+              <div class="field-row form-actions">
+                <button id="admin-unlock" type="submit">Unlock</button>
+                <button id="admin-refresh" type="button" hidden>Refresh</button>
+              </div>
+            </form>
+            <p id="admin-error" class="form-error" role="alert"></p>
+
+            <div id="admin-table-wrap" class="admin-table-wrap" hidden>
+              <table class="admin-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Event</th>
+                    <th>User</th>
+                    <th>IP</th>
+                    <th>Route</th>
+                    <th>Status</th>
+                    <th>Device</th>
+                    <th>Details</th>
+                  </tr>
+                </thead>
+                <tbody id="admin-table-body"></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
     </main>
 
     <script src="/app.js" defer></script>
