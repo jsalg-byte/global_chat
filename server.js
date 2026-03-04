@@ -24,6 +24,8 @@ const CLAIM_RATE_LIMIT_MAX = Number(process.env.CLAIM_RATE_LIMIT_MAX || 12);
 const WS_MESSAGE_RATE_LIMIT_WINDOW_SEC = Number(process.env.WS_MESSAGE_RATE_LIMIT_WINDOW_SEC || 10);
 const WS_MESSAGE_RATE_LIMIT_MAX = Number(process.env.WS_MESSAGE_RATE_LIMIT_MAX || 25);
 const HONEYPOT_BLOCK_SECONDS = Number(process.env.HONEYPOT_BLOCK_SECONDS || 86400);
+const PRESENCE_TTL_SECONDS = Number(process.env.PRESENCE_TTL_SECONDS || 120);
+const PRESENCE_HEARTBEAT_SECONDS = Number(process.env.PRESENCE_HEARTBEAT_SECONDS || 25);
 const COUNTRY_BLOCKLIST = String(process.env.COUNTRY_BLOCKLIST || 'CN')
   .split(',')
   .map((entry) => entry.trim().toUpperCase())
@@ -151,6 +153,29 @@ function broadcastChannel(slug, payload, exceptWs = null) {
 
 function presenceKey(slug) {
   return `${REDIS_PREFIX}:presence:${slug}`;
+}
+
+function presenceCutoffMs() {
+  return Date.now() - PRESENCE_TTL_SECONDS * 1000;
+}
+
+async function refreshPresenceHeartbeat(channel, presenceMember) {
+  if (!channel || !presenceMember) {
+    return;
+  }
+
+  await redisPublisher.zAdd(presenceKey(channel), [{ score: Date.now(), value: presenceMember }]);
+}
+
+async function getPresenceCount(slug) {
+  const cutoff = presenceCutoffMs();
+  const results = await redisPublisher
+    .multi()
+    .zRemRangeByScore(presenceKey(slug), '-inf', String(cutoff))
+    .zCount(presenceKey(slug), String(cutoff), '+inf')
+    .exec();
+
+  return Number(results?.[1] || 0);
 }
 
 function blockedIpKey(ipAddress) {
@@ -666,15 +691,17 @@ async function getChannelCountsBySlug(slugs) {
   }
 
   const pipeline = redisPublisher.multi();
+  const cutoff = presenceCutoffMs();
   for (const slug of slugs) {
-    pipeline.sCard(presenceKey(slug));
+    pipeline.zRemRangeByScore(presenceKey(slug), '-inf', String(cutoff));
+    pipeline.zCount(presenceKey(slug), String(cutoff), '+inf');
   }
 
   const rawCounts = await pipeline.exec();
   const counts = {};
 
   for (let i = 0; i < slugs.length; i += 1) {
-    const value = rawCounts?.[i];
+    const value = rawCounts?.[i * 2 + 1];
     counts[slugs[i]] = Number(value || 0);
   }
 
@@ -692,7 +719,7 @@ async function broadcastCounts() {
 }
 
 async function emitPresence(slug, action, username) {
-  const onlineCount = Number(await redisPublisher.sCard(presenceKey(slug)));
+  const onlineCount = await getPresenceCount(slug);
 
   const payload = {
     type: 'presence',
@@ -723,7 +750,7 @@ async function detachFromChannel(ws, reason = 'leave') {
   }
 
   if (meta.presenceMember) {
-    await redisPublisher.sRem(presenceKey(currentChannel), meta.presenceMember);
+    await redisPublisher.zRem(presenceKey(currentChannel), meta.presenceMember);
   }
 
   meta.channel = null;
@@ -755,7 +782,7 @@ async function attachToChannel(ws, slug) {
   meta.channel = slug;
   meta.presenceMember = `${INSTANCE_ID}:${meta.connectionId}`;
 
-  await redisPublisher.sAdd(presenceKey(slug), meta.presenceMember);
+  await refreshPresenceHeartbeat(slug, meta.presenceMember);
 
   await emitPresence(slug, 'join', meta.username);
   await broadcastCounts();
@@ -1168,10 +1195,22 @@ wss.on('connection', async (ws, req) => {
     ipAddress: wsIp,
     channel: null,
     connectionId: crypto.randomUUID(),
-    presenceMember: null
+    presenceMember: null,
+    heartbeatTimer: null
   };
 
   wsClients.set(ws, meta);
+
+  meta.heartbeatTimer = setInterval(() => {
+    const current = wsClients.get(ws);
+    if (!current || !current.channel || !current.presenceMember) {
+      return;
+    }
+
+    refreshPresenceHeartbeat(current.channel, current.presenceMember).catch((error) => {
+      console.error('Presence heartbeat failed:', error);
+    });
+  }, Math.max(PRESENCE_HEARTBEAT_SECONDS, 5) * 1000);
 
   queueSiteEvent(
     buildWsEvent(req, {
@@ -1222,7 +1261,7 @@ wss.on('connection', async (ws, req) => {
         }
 
         await attachToChannel(ws, slug);
-        const onlineCount = Number(await redisPublisher.sCard(presenceKey(slug)));
+        const onlineCount = await getPresenceCount(slug);
 
         sendJson(ws, {
           type: 'subscribed',
@@ -1329,6 +1368,11 @@ wss.on('connection', async (ws, req) => {
   });
 
   ws.on('close', () => {
+    if (meta.heartbeatTimer) {
+      clearInterval(meta.heartbeatTimer);
+      meta.heartbeatTimer = null;
+    }
+
     queueSiteEvent(
       buildWsEvent(req, {
         eventType: 'ws_disconnected',
@@ -1349,6 +1393,11 @@ wss.on('connection', async (ws, req) => {
   });
 
   ws.on('error', () => {
+    if (meta.heartbeatTimer) {
+      clearInterval(meta.heartbeatTimer);
+      meta.heartbeatTimer = null;
+    }
+
     queueSiteEvent(
       buildWsEvent(req, {
         eventType: 'ws_error',

@@ -19,6 +19,8 @@ Copy `.env.example` values into your local `.env` or Coolify dashboard:
 - `WS_MESSAGE_RATE_LIMIT_WINDOW_SEC`
 - `WS_MESSAGE_RATE_LIMIT_MAX`
 - `HONEYPOT_BLOCK_SECONDS`
+- `PRESENCE_TTL_SECONDS`
+- `PRESENCE_HEARTBEAT_SECONDS`
 - `COUNTRY_BLOCKLIST` (default `CN`)
 
 ## Run
@@ -41,6 +43,7 @@ Open: http://localhost:3000
 - Redis-backed rate limiting and bot filtering are enabled for API traffic and WebSocket message sends.
 - Honeypot trap endpoint: `/__trap__` (triggered by hidden link and honeypot payloads).
 - Country-level IP blocking is enabled via `COUNTRY_BLOCKLIST` (ISO country codes, comma-separated).
+- Presence/online counts use Redis heartbeat TTL cleanup to avoid stale users inflating `n online`.
 
 ## Implemented v1 Scope
 
