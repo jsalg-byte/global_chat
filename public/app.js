@@ -49,6 +49,10 @@ const elements = {
   newMessageNudge: document.getElementById('new-message-nudge')
 };
 
+function isMobileLikeInput() {
+  return window.matchMedia('(max-width: 980px), (pointer: coarse)').matches;
+}
+
 function setConnectionBanner(text) {
   if (!text) {
     elements.connectionStatus.hidden = true;
@@ -650,6 +654,10 @@ elements.messageForm.addEventListener('submit', (event) => {
 });
 
 elements.messageInput.addEventListener('keydown', (event) => {
+  if (isMobileLikeInput()) {
+    return;
+  }
+
   if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     elements.messageForm.requestSubmit();

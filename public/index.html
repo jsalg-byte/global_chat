@@ -120,7 +120,15 @@
                   <form id="message-form" class="message-form">
                     <div class="field-row-stacked">
                       <label class="sr-only" for="message-input">Type a message</label>
-                      <textarea id="message-input" rows="3" placeholder="Say something..." required></textarea>
+                      <textarea
+                        id="message-input"
+                        rows="3"
+                        placeholder="Say something..."
+                        autocapitalize="off"
+                        autocorrect="off"
+                        spellcheck="false"
+                        required
+                      ></textarea>
                     </div>
                     <div class="field-row form-actions between">
                       <p id="message-count" class="message-count">0 / 2000</p>
