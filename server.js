@@ -1765,6 +1765,63 @@ app.get('/api/admin/usernames/:usernameKey/ip-details', async (req, res, next) =
   }
 });
 
+app.get('/api/admin/ip-intel', async (req, res, next) => {
+  if (!requireAdminPassword(req, res)) {
+    return;
+  }
+
+  const ipInput = normalizeIp(req.query.ip);
+  if (!ipInput) {
+    res.status(400).json({ error: 'invalid_ip', message: 'Invalid IP address.' });
+    return;
+  }
+
+  try {
+    const intelligence = getIpIntelligenceForIp(ipInput);
+    const geo = intelligence?.geo || null;
+    const proxy = intelligence?.proxy || {
+      ip: ipInput,
+      database_available: ip2proxyReady,
+      is_proxy: null
+    };
+
+    const location = geo
+      ? {
+          country_code: geo.country_code || null,
+          country_name: geo.country_name || null,
+          region: geo.region_code || geo.region_name || null,
+          region_name: geo.region_name || null,
+          city: geo.city || null,
+          postal_code: geo.postal_code || null,
+          timezone: geo.timezone || null,
+          latitude: geo.latitude ?? null,
+          longitude: geo.longitude ?? null,
+          accuracy_radius_km: geo.accuracy_radius_km ?? null,
+          autonomous_system_number: geo.autonomous_system_number ?? null,
+          autonomous_system_organization: geo.autonomous_system_organization || null,
+          network: geo.network || null
+        }
+      : null;
+
+    res.json({
+      ip: ipInput,
+      location,
+      network_profile: intelligence?.network || null,
+      proxy_profile: proxy,
+      ip_intelligence: intelligence,
+      intelligence_sources: {
+        request_ip: true,
+        ipaddr: true,
+        maxmind_city: Boolean(maxMindReaders.city),
+        maxmind_asn: Boolean(maxMindReaders.asn),
+        ip2proxy: Boolean(ip2proxyReady)
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 app.get('/api/admin/channels', async (req, res, next) => {
   if (!requireAdminPassword(req, res)) {
     return;
