@@ -292,18 +292,9 @@ function showApp() {
 }
 
 function renderChannels() {
-  const sorted = [...state.channels].sort((a, b) => {
-    const countA = state.onlineCounts[a.slug] || 0;
-    const countB = state.onlineCounts[b.slug] || 0;
-    if (countA !== countB) {
-      return countB - countA;
-    }
-    return a.slug.localeCompare(b.slug);
-  });
-
   elements.channelList.innerHTML = '';
 
-  for (const channel of sorted) {
+  for (const channel of state.channels) {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'channel-item';

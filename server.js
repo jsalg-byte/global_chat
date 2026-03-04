@@ -1009,15 +1009,13 @@ app.get('/api/channels', requireAuth, async (req, res, next) => {
     const slugs = rows.map((row) => row.slug);
     const counts = await getChannelCountsBySlug(slugs);
 
-    const channels = rows
-      .map((row) => ({
-        slug: row.slug,
-        name: row.name,
-        description: row.description,
-        createdAt: new Date(row.created_at).toISOString(),
-        onlineCount: counts[row.slug] || 0
-      }))
-      .sort((a, b) => b.onlineCount - a.onlineCount || a.slug.localeCompare(b.slug));
+    const channels = rows.map((row) => ({
+      slug: row.slug,
+      name: row.name,
+      description: row.description,
+      createdAt: new Date(row.created_at).toISOString(),
+      onlineCount: counts[row.slug] || 0
+    }));
 
     res.json({ channels });
   } catch (error) {
