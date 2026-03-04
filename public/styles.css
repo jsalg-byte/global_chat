@@ -205,6 +205,7 @@ body {
   border: 1px solid #d0d0d0;
   padding: 6px;
   background: #f8f8f8;
+  font-family: Tahoma, 'MS Sans Serif', 'Segoe UI', sans-serif;
 }
 
 .message-row.self {

@@ -2,9 +2,9 @@ const MAX_MESSAGE_LENGTH = 2000;
 const USERNAME_REGEX = /^[A-Za-z0-9_]{3,24}$/;
 const KONAMI_SEQUENCE = ['ArrowUp', 'ArrowUp', 'ArrowDown', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'ArrowLeft', 'ArrowRight', 'b', 'a'];
 const USER_COLOR_PALETTE = [
-  '#000000', '#7f7f7f', '#880015', '#ed1c24', '#ff7f27', '#fff200', '#22b14c', '#00a2e8', '#3f48cc', '#a349a4',
-  '#ffffff', '#c3c3c3', '#b97a57', '#ffaec9', '#ffc90e', '#efe4b0', '#b5e61d', '#99d9ea', '#7092be', '#c8bfe7',
-  '#f8f8f8', '#d9d2e9', '#cfe2f3', '#d9ead3', '#fff2cc', '#fce5cd', '#f4cccc', '#ead1dc'
+  '#ffd1dc', '#ffe4b5', '#fff3b0', '#d9f2c2', '#c7f0db', '#bfe8ff', '#cddafd', '#e2d5ff', '#f8d9ff', '#f6c1d0',
+  '#f9e2d2', '#fdecc8', '#fef7d7', '#e7f6d5', '#dff7ea', '#d9f1ff', '#dfe7ff', '#ece2ff', '#f4e5ff', '#fbe4ef',
+  '#f4f4f4', '#e3e3e3', '#d7d7d7', '#dfe8d9', '#e9f1dc', '#e6f0f7', '#e5e8f5', '#eee7f6'
 ];
 
 const state = {
@@ -238,6 +238,11 @@ function normalizeHexColor(value) {
   return `#${match[1].toLowerCase()}`;
 }
 
+function isPaletteColor(color) {
+  const normalized = normalizeHexColor(color);
+  return Boolean(normalized && USER_COLOR_PALETTE.includes(normalized));
+}
+
 function colorFromUsername(username) {
   const text = String(username || '');
   if (!text) {
@@ -396,7 +401,7 @@ async function updateUserColor(color) {
 }
 
 function openChooseColorModal() {
-  const active = normalizeHexColor(state.userColor) || '#f8f8f8';
+  const active = isPaletteColor(state.userColor) ? normalizeHexColor(state.userColor) : colorFromUsername(state.username);
   const swatches = USER_COLOR_PALETTE.map((color) => {
     const selected = color === active ? ' selected' : '';
     return `<button type=\"button\" class=\"color-swatch-button${selected}\" data-color-swatch=\"${color}\" title=\"${color}\" style=\"background:${color}\"></button>`;
@@ -1077,7 +1082,7 @@ function renderMessages() {
       row.classList.add('self');
     }
 
-    const messageColor = normalizeHexColor(msg.color) || colorFromUsername(msg.username);
+    const messageColor = isPaletteColor(msg.color) ? normalizeHexColor(msg.color) : colorFromUsername(msg.username);
     row.style.backgroundColor = messageColor;
     row.style.color = getTextColorForBackground(messageColor);
 

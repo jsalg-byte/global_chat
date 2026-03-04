@@ -51,9 +51,9 @@ const USERNAME_REGEX = /^[A-Za-z0-9_]{3,24}$/;
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_DESCRIPTION_LENGTH = 120;
 const USER_COLOR_PALETTE = [
-  '#000000', '#7f7f7f', '#880015', '#ed1c24', '#ff7f27', '#fff200', '#22b14c', '#00a2e8', '#3f48cc', '#a349a4',
-  '#ffffff', '#c3c3c3', '#b97a57', '#ffaec9', '#ffc90e', '#efe4b0', '#b5e61d', '#99d9ea', '#7092be', '#c8bfe7',
-  '#f8f8f8', '#d9d2e9', '#cfe2f3', '#d9ead3', '#fff2cc', '#fce5cd', '#f4cccc', '#ead1dc'
+  '#ffd1dc', '#ffe4b5', '#fff3b0', '#d9f2c2', '#c7f0db', '#bfe8ff', '#cddafd', '#e2d5ff', '#f8d9ff', '#f6c1d0',
+  '#f9e2d2', '#fdecc8', '#fef7d7', '#e7f6d5', '#dff7ea', '#d9f1ff', '#dfe7ff', '#ece2ff', '#f4e5ff', '#fbe4ef',
+  '#f4f4f4', '#e3e3e3', '#d7d7d7', '#dfe8d9', '#e9f1dc', '#e6f0f7', '#e5e8f5', '#eee7f6'
 ];
 
 const INSTANCE_ID = crypto.randomUUID();
@@ -133,6 +133,11 @@ function normalizeHexColor(value) {
     return null;
   }
   return `#${match[1].toLowerCase()}`;
+}
+
+function isPaletteColor(color) {
+  const normalized = normalizeHexColor(color);
+  return Boolean(normalized && USER_COLOR_PALETTE.includes(normalized));
 }
 
 function getRandomPaletteColor() {
@@ -616,12 +621,16 @@ async function initIpIntelligenceProviders() {
 }
 
 async function ensureUserColors() {
+  const allowedPalette = USER_COLOR_PALETTE.map((entry) => entry.toLowerCase());
   const result = await pool.query(
     `
       SELECT username_key
       FROM user_claims
-      WHERE color_hex IS NULL OR color_hex !~ '^#[0-9a-fA-F]{6}$'
-    `
+      WHERE color_hex IS NULL
+         OR color_hex !~ '^#[0-9a-fA-F]{6}$'
+         OR lower(color_hex) <> ALL($1::text[])
+    `,
+    [allowedPalette]
   );
 
   for (const row of result.rows) {
@@ -1226,7 +1235,8 @@ app.post('/api/claim', async (req, res, next) => {
   }
 
   const usernameKey = requested.toLowerCase();
-  const selectedColor = normalizeHexColor(req.body?.color) || getRandomPaletteColor();
+  const requestedColor = normalizeHexColor(req.body?.color);
+  const selectedColor = isPaletteColor(requestedColor) ? requestedColor : getRandomPaletteColor();
   const token = crypto.randomBytes(32).toString('hex');
   const client = await pool.connect();
 
@@ -1296,8 +1306,8 @@ app.get('/api/session', requireAuth, (req, res) => {
 
 app.post('/api/profile/color', requireAuth, async (req, res, next) => {
   const color = normalizeHexColor(req.body?.color);
-  if (!color) {
-    res.status(400).json({ error: 'invalid_color', message: 'Color must be a 6-digit hex like #ff00aa.' });
+  if (!isPaletteColor(color)) {
+    res.status(400).json({ error: 'invalid_color', message: 'Color must be selected from the palette.' });
     return;
   }
 
