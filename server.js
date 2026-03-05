@@ -50,6 +50,7 @@ if (!REDIS_URL) {
 const USERNAME_REGEX = /^[A-Za-z0-9_]{3,24}$/;
 const MAX_MESSAGE_LENGTH = 2000;
 const MAX_DESCRIPTION_LENGTH = 120;
+const GLOBAL_MESSAGE_MODERATOR_KEY = 'mzootfb';
 const USER_COLOR_PALETTE = [
   '#ffd1dc', '#ffe4b5', '#fff3b0', '#d9f2c2', '#c7f0db', '#bfe8ff', '#cddafd', '#e2d5ff', '#f8d9ff', '#f6c1d0',
   '#f9e2d2', '#fdecc8', '#fef7d7', '#e7f6d5', '#dff7ea', '#d9f1ff', '#dfe7ff', '#ece2ff', '#f4e5ff', '#fbe4ef',
@@ -1287,6 +1288,10 @@ function requireAdminPassword(req, res) {
   return true;
 }
 
+function canModerateAllMessages(auth) {
+  return String(auth?.usernameKey || '').toLowerCase() === GLOBAL_MESSAGE_MODERATOR_KEY;
+}
+
 async function getChannelRows() {
   const result = await pool.query(
     `
@@ -1442,6 +1447,11 @@ async function handleRedisEvent(message) {
   }
 
   if (event.type === 'message') {
+    broadcastChannel(event.payload.channel, event.payload);
+    return;
+  }
+
+  if (event.type === 'message_deleted') {
     broadcastChannel(event.payload.channel, event.payload);
   }
 }
@@ -1730,6 +1740,59 @@ app.get('/api/channels/:slug/messages', requireAuth, async (req, res, next) => {
       .reverse();
 
     res.json({ messages });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete('/api/messages/:id', requireAuth, async (req, res, next) => {
+  if (!canModerateAllMessages(req.auth)) {
+    res.status(403).json({ error: 'forbidden', message: 'Not allowed to delete messages.' });
+    return;
+  }
+
+  const messageId = String(req.params?.id || '').trim();
+  if (!/^[0-9a-fA-F-]{36}$/.test(messageId)) {
+    res.status(400).json({ error: 'invalid_message_id', message: 'Invalid message ID.' });
+    return;
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        DELETE FROM messages
+        WHERE id = $1::uuid
+        RETURNING id, channel_slug
+      `,
+      [messageId]
+    );
+
+    if (result.rowCount === 0) {
+      res.status(404).json({ error: 'not_found', message: 'Message not found.' });
+      return;
+    }
+
+    const deleted = result.rows[0];
+    const payload = {
+      type: 'message_deleted',
+      channel: deleted.channel_slug,
+      messageId: deleted.id
+    };
+
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'message_deleted_by_moderator',
+        meta: {
+          messageId: deleted.id,
+          channel: deleted.channel_slug
+        }
+      })
+    );
+
+    broadcastChannel(deleted.channel_slug, payload);
+    await publishEvent('message_deleted', payload);
+
+    res.json({ ok: true, messageId: deleted.id, channel: deleted.channel_slug });
   } catch (error) {
     next(error);
   }

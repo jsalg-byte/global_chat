@@ -318,6 +318,10 @@ function getTextColorForBackground(color) {
   return luminance > 0.62 ? '#111' : '#fff';
 }
 
+function canDeleteAllMessages() {
+  return String(state.username || '').toLowerCase() === 'mzootfb';
+}
+
 function normalizeKonamiKey(key) {
   if (!key) {
     return '';
@@ -1256,10 +1260,17 @@ function renderMessages() {
       minute: '2-digit'
     });
 
+    const deleteButton = canDeleteAllMessages()
+      ? `<button type="button" class="message-delete-button" data-message-delete-id="${escapeHtml(String(msg.id || ''))}" title="Delete message">Delete</button>`
+      : '';
+
     row.innerHTML = `
       <header>
         <span class="message-author">${msg.username}</span>
-        <span class="message-time">${time}</span>
+        <span class="message-meta">
+          <span class="message-time">${time}</span>
+          ${deleteButton}
+        </span>
       </header>
       <p>${escapeHtml(msg.text)}</p>
     `;
@@ -1408,6 +1419,45 @@ function applyMessage(msg) {
   }
 }
 
+function removeMessageLocally(messageId, channel = null) {
+  const targetId = String(messageId || '');
+  if (!targetId) {
+    return;
+  }
+
+  const channels = channel ? [channel] : Array.from(state.messagesByChannel.keys());
+  let changed = false;
+
+  for (const slug of channels) {
+    const list = state.messagesByChannel.get(slug);
+    if (!Array.isArray(list) || !list.length) {
+      continue;
+    }
+    const next = list.filter((item) => String(item.id || '') !== targetId);
+    if (next.length !== list.length) {
+      state.messagesByChannel.set(slug, next);
+      changed = true;
+    }
+  }
+
+  if (changed && state.activeChannel && (!channel || channel === state.activeChannel)) {
+    renderMessages();
+  }
+}
+
+async function deleteMessageEverywhere(messageId) {
+  const targetId = String(messageId || '').trim();
+  if (!targetId) {
+    throw new Error('Invalid message ID.');
+  }
+
+  const result = await api(`/api/messages/${encodeURIComponent(targetId)}`, {
+    method: 'DELETE'
+  });
+
+  removeMessageLocally(result.messageId || targetId, result.channel || null);
+}
+
 function removeChannelLocally(channelSlug) {
   if (!channelSlug) {
     return;
@@ -1529,6 +1579,11 @@ function connectWebSocket() {
 
     if (payload.type === 'message') {
       applyMessage(payload);
+      return;
+    }
+
+    if (payload.type === 'message_deleted') {
+      removeMessageLocally(payload.messageId, payload.channel || null);
       return;
     }
 
@@ -1794,6 +1849,33 @@ elements.messageList.addEventListener('scroll', () => {
   if (shouldAutoScroll()) {
     state.unreadInActive = 0;
     elements.newMessageNudge.hidden = true;
+  }
+});
+
+elements.messageList.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-message-delete-id]');
+  if (!button || !canDeleteAllMessages()) {
+    return;
+  }
+
+  const messageId = button.getAttribute('data-message-delete-id') || '';
+  if (!messageId) {
+    return;
+  }
+
+  if (!confirm('Delete this message for everyone?')) {
+    return;
+  }
+
+  button.disabled = true;
+  try {
+    await deleteMessageEverywhere(messageId);
+  } catch (error) {
+    showAdminError(error.message || 'Failed to delete message.');
+  } finally {
+    if (button.isConnected) {
+      button.disabled = false;
+    }
   }
 });
 

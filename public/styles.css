@@ -220,6 +220,12 @@ body {
   margin-bottom: 4px;
 }
 
+.message-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .message-author {
   font-weight: 700;
 }
@@ -233,6 +239,13 @@ body {
   margin: 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.message-delete-button {
+  font-size: 11px;
+  line-height: 1;
+  padding: 2px 6px;
+  min-height: 20px;
 }
 
 .new-message-nudge {
