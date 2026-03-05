@@ -339,7 +339,20 @@ function parseIpFromForwarded(forwarded) {
 function getClientIp(req) {
   const fromReqIp = normalizeIp(req.ip);
   const fromSocket = normalizeIp(req.socket?.remoteAddress);
-  return fromReqIp || fromSocket || 'unknown';
+  const directIp = fromReqIp || fromSocket;
+
+  // If we're behind an internal proxy and Express isn't resolving the public
+  // client correctly, accept the first forwarded IP only when direct IP is local.
+  if (directIp && isIpLocalOrLoopback(directIp)) {
+    const forwardedForRaw = req.headers['x-forwarded-for'];
+    const forwardedFor = Array.isArray(forwardedForRaw) ? forwardedForRaw.join(',') : forwardedForRaw || null;
+    const fromForwarded = normalizeIp(parseIpFromForwarded(forwardedFor));
+    if (fromForwarded && !isIpLocalOrLoopback(fromForwarded)) {
+      return fromForwarded;
+    }
+  }
+
+  return directIp || 'unknown';
 }
 
 function normalizeIp(ipAddress) {
