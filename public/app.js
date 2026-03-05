@@ -28,7 +28,14 @@ const state = {
   adminPassword: '',
   adminActiveTab: 'events',
   adminEvents: [],
+  adminEventsPagination: {
+    total: 0,
+    limit: 100,
+    offset: 0,
+    has_more: false
+  },
   adminNonUsEvents: [],
+  adminBannedIps: [],
   modalStack: []
 };
 
@@ -71,6 +78,9 @@ const elements = {
   adminRefresh: document.getElementById('admin-refresh'),
   adminUnblock: document.getElementById('admin-unblock'),
   adminError: document.getElementById('admin-error'),
+  adminEventsPrev: document.getElementById('admin-events-prev'),
+  adminEventsNext: document.getElementById('admin-events-next'),
+  adminEventsPageInfo: document.getElementById('admin-events-page-info'),
   adminTabs: document.getElementById('admin-tabs'),
   adminTabButtons: document.querySelectorAll('[data-admin-tab]'),
   adminPanels: document.getElementById('admin-panels'),
@@ -78,10 +88,12 @@ const elements = {
   adminPanelUsernames: document.getElementById('admin-panel-usernames'),
   adminPanelNonUs: document.getElementById('admin-panel-non-us'),
   adminPanelChannels: document.getElementById('admin-panel-channels'),
+  adminPanelBanned: document.getElementById('admin-panel-banned'),
   adminEventsBody: document.getElementById('admin-events-body'),
   adminUsernamesBody: document.getElementById('admin-usernames-body'),
   adminNonUsBody: document.getElementById('admin-non-us-body'),
   adminChannelsBody: document.getElementById('admin-channels-body'),
+  adminBannedBody: document.getElementById('admin-banned-body'),
   appModal: document.getElementById('app-modal'),
   appModalTitle: document.getElementById('app-modal-title'),
   appModalContent: document.getElementById('app-modal-content'),
@@ -116,6 +128,12 @@ function clearSessionAndShowClaim() {
   state.typingUsers = new Map();
   state.unreadInActive = 0;
   state.adminPassword = '';
+  state.adminEventsPagination = {
+    total: 0,
+    limit: 100,
+    offset: 0,
+    has_more: false
+  };
   localStorage.removeItem('chat_token');
   state.connected = false;
   if (state.ws) {
@@ -224,6 +242,37 @@ function formatTimeOrDash(value) {
     return '-';
   }
   return formatTime(value);
+}
+
+function formatDuration(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value < 0) {
+    return '-';
+  }
+  if (value === 0) {
+    return '0s';
+  }
+
+  const days = Math.floor(value / 86400);
+  const hours = Math.floor((value % 86400) / 3600);
+  const minutes = Math.floor((value % 3600) / 60);
+  const secs = Math.floor(value % 60);
+  const parts = [];
+
+  if (days > 0) {
+    parts.push(`${days}d`);
+  }
+  if (hours > 0) {
+    parts.push(`${hours}h`);
+  }
+  if (minutes > 0) {
+    parts.push(`${minutes}m`);
+  }
+  if (secs > 0 && parts.length < 2) {
+    parts.push(`${secs}s`);
+  }
+
+  return parts.join(' ') || '0s';
 }
 
 function normalizeHexColor(value) {
@@ -713,7 +762,7 @@ async function openUserIpDetailsModal(usernameKey) {
 }
 
 function setAdminTab(tabId) {
-  const nextTab = ['events', 'usernames', 'non-us', 'channels'].includes(tabId) ? tabId : 'events';
+  const nextTab = ['events', 'usernames', 'non-us', 'channels', 'banned'].includes(tabId) ? tabId : 'events';
   state.adminActiveTab = nextTab;
 
   for (const button of elements.adminTabButtons) {
@@ -726,6 +775,7 @@ function setAdminTab(tabId) {
   elements.adminPanelUsernames.hidden = nextTab !== 'usernames';
   elements.adminPanelNonUs.hidden = nextTab !== 'non-us';
   elements.adminPanelChannels.hidden = nextTab !== 'channels';
+  elements.adminPanelBanned.hidden = nextTab !== 'banned';
 }
 
 function renderAdminEvents(events) {
@@ -761,6 +811,41 @@ function renderAdminEvents(events) {
 
     elements.adminEventsBody.appendChild(row);
   }
+}
+
+function renderAdminEventsPagination() {
+  const pagination = state.adminEventsPagination || {};
+  const total = Number(pagination.total || 0);
+  const limit = Number(pagination.limit || 0);
+  const offset = Number(pagination.offset || 0);
+  const hasMore = Boolean(pagination.has_more);
+
+  const start = total === 0 ? 0 : offset + 1;
+  const end = total === 0 ? 0 : Math.min(offset + Math.max(limit, 0), total);
+  elements.adminEventsPageInfo.textContent = total === 0 ? '0 events' : `${start}-${end} of ${total} events`;
+  elements.adminEventsPrev.disabled = offset <= 0;
+  elements.adminEventsNext.disabled = !hasMore;
+}
+
+async function loadAdminEventsPage(password, offset = 0) {
+  const pageSize = Number(state.adminEventsPagination?.limit || 100);
+  const safeOffset = Number.isFinite(offset) ? Math.max(0, Math.floor(offset)) : 0;
+  const payload = await fetchAdminData(
+    `/api/admin/events?limit=${encodeURIComponent(pageSize)}&offset=${encodeURIComponent(safeOffset)}`,
+    password
+  );
+
+  state.adminEventsPagination = {
+    total: Number(payload?.pagination?.total || 0),
+    limit: Number(payload?.pagination?.limit || pageSize),
+    offset: Number(payload?.pagination?.offset || safeOffset),
+    has_more: Boolean(payload?.pagination?.has_more),
+    next_offset: payload?.pagination?.next_offset ?? null,
+    prev_offset: payload?.pagination?.prev_offset ?? null
+  };
+
+  renderAdminEvents(payload.events || []);
+  renderAdminEventsPagination();
 }
 
 function renderAdminUsernames(usernames) {
@@ -880,6 +965,44 @@ function renderAdminChannels(channels) {
   }
 }
 
+function renderAdminBannedIps(bannedIps) {
+  state.adminBannedIps = Array.isArray(bannedIps) ? bannedIps : [];
+  elements.adminBannedBody.innerHTML = '';
+
+  if (!state.adminBannedIps.length) {
+    const row = document.createElement('tr');
+    row.innerHTML = '<td class=\"admin-empty\" colspan=\"4\">No banned IPs.</td>';
+    elements.adminBannedBody.appendChild(row);
+    return;
+  }
+
+  for (const entry of state.adminBannedIps) {
+    const ipAddress = String(entry.ip_address || '');
+    const reason = String(entry.reason || 'blocked');
+    const ttlText = formatDuration(entry.ttl_seconds);
+    const buttonDisabled = ipAddress ? '' : 'disabled';
+    const row = document.createElement('tr');
+
+    row.innerHTML = `
+      <td>${escapeHtml(ipAddress || '-')}</td>
+      <td>${escapeHtml(reason)}</td>
+      <td>${escapeHtml(ttlText)}</td>
+      <td>
+        <button
+          type=\"button\"
+          class=\"admin-release-button\"
+          data-unban-ip=\"${escapeHtml(ipAddress)}\"
+          ${buttonDisabled}
+        >
+          Unban
+        </button>
+      </td>
+    `;
+
+    elements.adminBannedBody.appendChild(row);
+  }
+}
+
 async function fetchAdminData(path, password) {
   const response = await fetch(path, {
     headers: {
@@ -895,7 +1018,8 @@ async function fetchAdminData(path, password) {
   return payload;
 }
 
-async function loadAdminDashboard(password) {
+async function loadAdminDashboard(password, options = {}) {
+  const { resetEventsPage = true } = options;
   if (!password) {
     showAdminError('Password required.');
     return;
@@ -905,21 +1029,26 @@ async function loadAdminDashboard(password) {
   elements.adminUnlock.disabled = true;
   elements.adminRefresh.disabled = true;
   elements.adminUnblock.disabled = true;
+  elements.adminEventsPrev.disabled = true;
+  elements.adminEventsNext.disabled = true;
 
   try {
-    const [eventsPayload, usernamesPayload, nonUsPayload, channelsPayload] = await Promise.all([
-      fetchAdminData('/api/admin/events?limit=500', password),
+    const targetOffset = resetEventsPage ? 0 : Number(state.adminEventsPagination?.offset || 0);
+    state.adminEventsPagination.offset = targetOffset;
+    const [usernamesPayload, nonUsPayload, channelsPayload, bannedPayload] = await Promise.all([
       fetchAdminData('/api/admin/usernames?limit=10000', password),
       fetchAdminData('/api/admin/events/non-us?limit=500', password),
-      fetchAdminData('/api/admin/channels?limit=10000', password)
+      fetchAdminData('/api/admin/channels?limit=10000', password),
+      fetchAdminData('/api/admin/banned-ips?limit=5000', password)
     ]);
 
     state.adminPassword = password;
     setAdminLockedState(false);
-    renderAdminEvents(eventsPayload.events || []);
+    await loadAdminEventsPage(password, targetOffset);
     renderAdminUsernames(usernamesPayload.usernames || []);
     renderAdminNonUsEvents(nonUsPayload.events || []);
     renderAdminChannels(channelsPayload.channels || []);
+    renderAdminBannedIps(bannedPayload.banned_ips || []);
     setAdminTab(state.adminActiveTab);
   } catch (error) {
     state.adminPassword = '';
@@ -1003,6 +1132,42 @@ async function deleteAdminChannel(channelSlug) {
     await loadAdminDashboard(password);
   } catch (error) {
     showAdminError(error.message || 'Failed to delete chatroom.');
+  }
+}
+
+async function unbanAdminIp(ipAddress) {
+  const password = state.adminPassword || elements.adminPasswordInput.value;
+  if (!password) {
+    showAdminError('Password required.');
+    return;
+  }
+
+  if (!ipAddress) {
+    showAdminError('Invalid IP address.');
+    return;
+  }
+
+  showAdminError('');
+
+  try {
+    const response = await fetch('/api/admin/banned-ips/unban', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-password': password
+      },
+      body: JSON.stringify({ ipAddress })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.message || 'Failed to unban IP.');
+    }
+
+    await loadAdminDashboard(password, { resetEventsPage: false });
+    setAdminTab('banned');
+  } catch (error) {
+    showAdminError(error.message || 'Failed to unban IP.');
   }
 }
 
@@ -1650,7 +1815,51 @@ elements.adminPasswordForm.addEventListener('submit', async (event) => {
 
 elements.adminRefresh.addEventListener('click', async () => {
   const password = state.adminPassword || elements.adminPasswordInput.value;
-  await loadAdminDashboard(password);
+  await loadAdminDashboard(password, { resetEventsPage: false });
+});
+
+elements.adminEventsPrev.addEventListener('click', async () => {
+  const password = state.adminPassword || elements.adminPasswordInput.value;
+  if (!password) {
+    showAdminError('Password required.');
+    return;
+  }
+
+  const prevOffset = Number(state.adminEventsPagination?.prev_offset);
+  if (!Number.isFinite(prevOffset) || prevOffset < 0) {
+    return;
+  }
+
+  elements.adminEventsPrev.disabled = true;
+  elements.adminEventsNext.disabled = true;
+  try {
+    await loadAdminEventsPage(password, prevOffset);
+  } catch (error) {
+    showAdminError(error.message || 'Unable to load previous events.');
+    renderAdminEventsPagination();
+  }
+});
+
+elements.adminEventsNext.addEventListener('click', async () => {
+  const password = state.adminPassword || elements.adminPasswordInput.value;
+  if (!password) {
+    showAdminError('Password required.');
+    return;
+  }
+
+  const nextOffset = Number(state.adminEventsPagination?.next_offset);
+  if (!Number.isFinite(nextOffset) || nextOffset < 0) {
+    return;
+  }
+
+  elements.adminEventsPrev.disabled = true;
+  elements.adminEventsNext.disabled = true;
+  try {
+    await loadAdminEventsPage(password, nextOffset);
+  } catch (error) {
+    showAdminError(error.message || 'Unable to load next events.');
+    renderAdminEventsPagination();
+  }
 });
 
 elements.adminUnblock.addEventListener('click', async () => {
@@ -1766,6 +1975,23 @@ elements.adminChannelsBody.addEventListener('click', async (event) => {
   button.disabled = true;
   try {
     await deleteAdminChannel(channelSlug);
+  } finally {
+    if (button.isConnected) {
+      button.disabled = false;
+    }
+  }
+});
+
+elements.adminBannedBody.addEventListener('click', async (event) => {
+  const button = event.target.closest('[data-unban-ip]');
+  if (!button) {
+    return;
+  }
+
+  const ipAddress = button.getAttribute('data-unban-ip') || '';
+  button.disabled = true;
+  try {
+    await unbanAdminIp(ipAddress);
   } finally {
     if (button.isConnected) {
       button.disabled = false;

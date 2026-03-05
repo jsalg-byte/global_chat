@@ -352,6 +352,10 @@ body {
   overflow: hidden;
 }
 
+.admin-events-toolbar {
+  margin-bottom: 6px;
+}
+
 .admin-table-wrap {
   flex: 1 1 auto;
   height: 100%;

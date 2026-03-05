@@ -12,7 +12,6 @@ const geoip = require('geoip-lite');
 const { IP2Proxy } = require('ip2proxy-nodejs');
 const ipaddr = require('ipaddr.js');
 const { Pool } = require('pg');
-const requestIp = require('request-ip');
 const { createClient } = require('redis');
 const { WebSocketServer } = require('ws');
 
@@ -21,6 +20,7 @@ const DATABASE_URL = process.env.DATABASE_URL;
 const REDIS_URL = process.env.REDIS_URL;
 const REDIS_PREFIX = process.env.REDIS_PREFIX || 'yungjewboii_global_chat';
 const DATABASE_SSL = process.env.DATABASE_SSL || 'false';
+const TRUST_PROXY = process.env.TRUST_PROXY;
 const ADMIN_DASHBOARD_PASSWORD = process.env.ADMIN_DASHBOARD_PASSWORD || 'badwolf';
 const HTTP_RATE_LIMIT_WINDOW_SEC = Number(process.env.HTTP_RATE_LIMIT_WINDOW_SEC || 60);
 const HTTP_RATE_LIMIT_MAX = Number(process.env.HTTP_RATE_LIMIT_MAX || 240);
@@ -60,7 +60,6 @@ const INSTANCE_ID = crypto.randomUUID();
 const EVENTS_CHANNEL = `${REDIS_PREFIX}:events`;
 
 const app = express();
-app.set('trust proxy', true);
 app.use(express.json({ limit: '64kb' }));
 
 function parseBoolean(value, defaultValue = false) {
@@ -69,6 +68,38 @@ function parseBoolean(value, defaultValue = false) {
   }
   return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
 }
+
+function resolveTrustProxySetting(value) {
+  if (value === undefined || value === null || value === '') {
+    return false;
+  }
+
+  const raw = String(value).trim();
+  const lower = raw.toLowerCase();
+
+  if (['false', '0', 'off', 'no'].includes(lower)) {
+    return false;
+  }
+
+  if (['true', '1', 'on', 'yes'].includes(lower)) {
+    return true;
+  }
+
+  if (/^\d+$/.test(raw)) {
+    return Number(raw);
+  }
+
+  const entries = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (!entries.length) {
+    return false;
+  }
+  return entries;
+}
+
+app.set('trust proxy', resolveTrustProxySetting(TRUST_PROXY));
 
 const useDatabaseSsl = parseBoolean(DATABASE_SSL, false);
 
@@ -306,21 +337,9 @@ function parseIpFromForwarded(forwarded) {
 }
 
 function getClientIp(req) {
-  const fromExtractor = normalizeIp(requestIp.getClientIp(req));
-  if (fromExtractor) {
-    return fromExtractor;
-  }
-
-  const forwardedForRaw = req.headers['x-forwarded-for'];
-  const forwardedFor = Array.isArray(forwardedForRaw)
-    ? forwardedForRaw.join(',')
-    : forwardedForRaw || null;
-
-  const fromForwarded = normalizeIp(parseIpFromForwarded(forwardedFor));
   const fromReqIp = normalizeIp(req.ip);
   const fromSocket = normalizeIp(req.socket?.remoteAddress);
-
-  return fromForwarded || fromReqIp || fromSocket || 'unknown';
+  return fromReqIp || fromSocket || 'unknown';
 }
 
 function normalizeIp(ipAddress) {
@@ -550,12 +569,18 @@ function getRequestPathname(pathValue) {
   }
 }
 
-function isImmediateEnvProbe(req) {
-  if (String(req.method || '').toUpperCase() !== 'GET') {
-    return false;
-  }
+function getImmediatePathBanReason(req) {
   const pathname = getRequestPathname(req.originalUrl || req.url || req.path);
-  return pathname === '/.env';
+  if (pathname.includes('/.env')) {
+    return 'env_probe';
+  }
+  if (pathname === '/wp' || pathname.startsWith('/wp/') || pathname === '/wordpress' || pathname.startsWith('/wordpress/')) {
+    return 'wp_probe';
+  }
+  if (pathname.includes('.sh') || pathname.includes('.sql') || pathname.includes('.bak')) {
+    return 'sensitive_file_probe';
+  }
+  return null;
 }
 
 function isSuspiciousUserAgent(userAgent) {
@@ -671,6 +696,55 @@ async function isIpBlocked(ipAddress) {
   }
   const value = await redisPublisher.get(blockedIpKey(ipAddress));
   return Boolean(value);
+}
+
+async function listBlockedIps(limit = 500) {
+  const max = Number.isFinite(limit) ? Math.max(1, Math.min(5000, Math.floor(limit))) : 500;
+  const prefix = `${REDIS_PREFIX}:blocked_ip:`;
+  const keys = [];
+
+  for await (const key of redisPublisher.scanIterator({ MATCH: `${prefix}*`, COUNT: 200 })) {
+    keys.push(String(key));
+    if (keys.length >= max) {
+      break;
+    }
+  }
+
+  if (!keys.length) {
+    return [];
+  }
+
+  const pipeline = redisPublisher.multi();
+  for (const key of keys) {
+    pipeline.get(key);
+    pipeline.ttl(key);
+  }
+  const results = await pipeline.exec();
+
+  const entries = [];
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index];
+    const reason = results?.[index * 2] ?? null;
+    const ttlRaw = Number(results?.[index * 2 + 1]);
+
+    if (!key.startsWith(prefix) || ttlRaw === -2) {
+      continue;
+    }
+
+    entries.push({
+      ip_address: key.slice(prefix.length),
+      reason: reason ? String(reason) : 'blocked',
+      ttl_seconds: Number.isFinite(ttlRaw) && ttlRaw >= 0 ? ttlRaw : null
+    });
+  }
+
+  entries.sort((a, b) => {
+    const aTtl = a.ttl_seconds === null ? Number.MAX_SAFE_INTEGER : a.ttl_seconds;
+    const bTtl = b.ttl_seconds === null ? Number.MAX_SAFE_INTEGER : b.ttl_seconds;
+    return aTtl - bTtl;
+  });
+
+  return entries;
 }
 
 function sanitizeHeaders(headers) {
@@ -918,15 +992,17 @@ app.use(async (req, res, next) => {
       return;
     }
 
-    if (isImmediateEnvProbe(req)) {
-      await blockIp(clientIp, HONEYPOT_BLOCK_SECONDS, 'env_probe');
+    const immediateBanReason = getImmediatePathBanReason(req);
+    if (immediateBanReason) {
+      await blockIp(clientIp, HONEYPOT_BLOCK_SECONDS, immediateBanReason);
 
       queueSiteEvent(
         buildHttpEvent(req, {
-          eventType: 'env_probe_blocked',
+          eventType: 'path_probe_blocked',
           statusCode: 403,
           meta: {
-            reason: 'GET /.env immediate block'
+            reason: immediateBanReason,
+            path: getRequestPathname(req.originalUrl || req.url || req.path)
           }
         })
       );
@@ -1496,43 +1572,63 @@ app.get('/api/admin/events', async (req, res, next) => {
 
   const limitRaw = Number(req.query.limit || 250);
   const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(1000, Math.floor(limitRaw))) : 250;
+  const offsetRaw = Number(req.query.offset || 0);
+  const offset = Number.isFinite(offsetRaw) ? Math.max(0, Math.floor(offsetRaw)) : 0;
 
   try {
-    const result = await pool.query(
-      `
-        SELECT
-          id,
-          event_type,
-          event_time,
-          ip_address,
-          forwarded_for,
-          remote_address,
-          method,
-          path,
-          status_code,
-          duration_ms,
-          username,
-          username_key,
-          user_agent,
-          referer,
-          origin,
-          accept_language,
-          sec_ch_ua,
-          sec_ch_ua_mobile,
-          sec_ch_ua_platform,
-          token_fingerprint,
-          headers_json,
-          body_json,
-          meta_json,
-          instance_id
-        FROM site_events
-        ORDER BY event_time DESC
-        LIMIT $1
-      `,
-      [limit]
-    );
+    const [result, countResult] = await Promise.all([
+      pool.query(
+        `
+          SELECT
+            id,
+            event_type,
+            event_time,
+            ip_address,
+            forwarded_for,
+            remote_address,
+            method,
+            path,
+            status_code,
+            duration_ms,
+            username,
+            username_key,
+            user_agent,
+            referer,
+            origin,
+            accept_language,
+            sec_ch_ua,
+            sec_ch_ua_mobile,
+            sec_ch_ua_platform,
+            token_fingerprint,
+            headers_json,
+            body_json,
+            meta_json,
+            instance_id
+          FROM site_events
+          ORDER BY event_time DESC
+          LIMIT $1
+          OFFSET $2
+        `,
+        [limit, offset]
+      ),
+      pool.query('SELECT COUNT(*)::bigint AS total FROM site_events')
+    ]);
 
-    res.json({ events: result.rows });
+    const total = Number(countResult.rows[0]?.total || 0);
+    const nextOffset = offset + result.rows.length;
+    const hasMore = nextOffset < total;
+
+    res.json({
+      events: result.rows,
+      pagination: {
+        total,
+        limit,
+        offset,
+        has_more: hasMore,
+        next_offset: hasMore ? nextOffset : null,
+        prev_offset: offset > 0 ? Math.max(0, offset - limit) : null
+      }
+    });
   } catch (error) {
     next(error);
   }
@@ -1840,7 +1936,7 @@ app.get('/api/admin/usernames/:usernameKey/ip-details', async (req, res, next) =
       proxy_profile: proxyProfile,
       ip_intelligence: lastIpIntel,
       intelligence_sources: {
-        request_ip: true,
+        request_ip: false,
         ipaddr: true,
         maxmind_city: Boolean(maxMindReaders.city),
         maxmind_asn: Boolean(maxMindReaders.asn),
@@ -1899,7 +1995,7 @@ app.get('/api/admin/ip-intel', async (req, res, next) => {
       proxy_profile: proxy,
       ip_intelligence: intelligence,
       intelligence_sources: {
-        request_ip: true,
+        request_ip: false,
         ipaddr: true,
         maxmind_city: Boolean(maxMindReaders.city),
         maxmind_asn: Boolean(maxMindReaders.asn),
@@ -1949,6 +2045,54 @@ app.get('/api/admin/channels', async (req, res, next) => {
     }));
 
     res.json({ channels });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get('/api/admin/banned-ips', async (req, res, next) => {
+  if (!requireAdminPassword(req, res)) {
+    return;
+  }
+
+  const limitRaw = Number(req.query.limit || 1000);
+  const limit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(5000, Math.floor(limitRaw))) : 1000;
+
+  try {
+    const bannedIps = await listBlockedIps(limit);
+    res.json({ banned_ips: bannedIps });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/banned-ips/unban', async (req, res, next) => {
+  if (!requireAdminPassword(req, res)) {
+    return;
+  }
+
+  const ipAddress = normalizeIp(req.body?.ipAddress);
+  if (!ipAddress) {
+    res.status(400).json({ error: 'invalid_ip', message: 'Invalid IP address.' });
+    return;
+  }
+
+  try {
+    await redisPublisher.del(blockedIpKey(ipAddress));
+    await redisPublisher.del(botStrikeKey(ipAddress));
+
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'admin_unblocked_ip',
+        statusCode: 200,
+        meta: {
+          unblockedIp: ipAddress,
+          source: 'banned_ips_tab'
+        }
+      })
+    );
+
+    res.json({ ok: true, ip: ipAddress });
   } catch (error) {
     next(error);
   }

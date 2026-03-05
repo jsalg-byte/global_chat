@@ -192,10 +192,20 @@
               <button type="button" role="tab" class="admin-tab" data-admin-tab="channels" aria-selected="false" aria-controls="admin-panel-channels">
                 Chatrooms
               </button>
+              <button type="button" role="tab" class="admin-tab" data-admin-tab="banned" aria-selected="false" aria-controls="admin-panel-banned">
+                Banned IPs
+              </button>
             </menu>
 
             <div id="admin-panels" class="admin-panels" hidden>
               <div id="admin-panel-events" class="admin-panel" role="tabpanel">
+                <div class="field-row form-actions between admin-events-toolbar">
+                  <p id="admin-events-page-info" class="message-count">0 events</p>
+                  <div class="top-actions">
+                    <button id="admin-events-prev" type="button">Prev</button>
+                    <button id="admin-events-next" type="button">Next</button>
+                  </div>
+                </div>
                 <div class="admin-table-wrap">
                   <table class="admin-table">
                     <thead>
@@ -269,6 +279,22 @@
                       </tr>
                     </thead>
                     <tbody id="admin-channels-body"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div id="admin-panel-banned" class="admin-panel" role="tabpanel" hidden>
+                <div class="admin-table-wrap">
+                  <table class="admin-table">
+                    <thead>
+                      <tr>
+                        <th>IP</th>
+                        <th>Reason</th>
+                        <th>TTL</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody id="admin-banned-body"></tbody>
                   </table>
                 </div>
               </div>
