@@ -945,6 +945,21 @@ function buildWsEvent(req, extras = {}) {
   };
 }
 
+function requestWantsHtml(req) {
+  const accept = String(req.headers.accept || '').toLowerCase();
+  return accept.includes('text/html');
+}
+
+function respondForbidden(req, res, message = 'Access denied.') {
+  const pathname = getRequestPathname(req.originalUrl || req.url || req.path);
+  const isApiRequest = pathname.startsWith('/api/');
+  if (!isApiRequest && requestWantsHtml(req)) {
+    res.redirect(302, '/403');
+    return;
+  }
+  res.status(403).json({ error: 'forbidden', message });
+}
+
 app.use((req, res, next) => {
   const startedAt = Date.now();
 
@@ -969,15 +984,19 @@ app.use(async (req, res, next) => {
   try {
     const clientIp = getClientIp(req);
     const countryCode = getCountryCodeForIp(clientIp);
+    const pathname = getRequestPathname(req.originalUrl || req.url || req.path);
     const isAdminRoute = req.path.startsWith('/api/admin/');
     const hasValidAdminPassword = String(req.headers['x-admin-password'] || '') === ADMIN_DASHBOARD_PASSWORD;
+    const isForbiddenPageRoute = pathname === '/403';
+    const isForbiddenUnlockRoute = pathname === '/forbidden-admin-unlock';
+    const isForbiddenRoute = isForbiddenPageRoute || isForbiddenUnlockRoute;
 
-    if (await isIpBlocked(clientIp) && !(isAdminRoute && hasValidAdminPassword)) {
-      res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
+    if (await isIpBlocked(clientIp) && !(isAdminRoute && hasValidAdminPassword) && !isForbiddenRoute) {
+      respondForbidden(req, res, 'Access denied.');
       return;
     }
 
-    if (countryCode && COUNTRY_BLOCKLIST.includes(countryCode) && !(isAdminRoute && hasValidAdminPassword)) {
+    if (countryCode && COUNTRY_BLOCKLIST.includes(countryCode) && !(isAdminRoute && hasValidAdminPassword) && !isForbiddenRoute) {
       queueSiteEvent(
         buildHttpEvent(req, {
           eventType: 'country_blocked',
@@ -988,7 +1007,7 @@ app.use(async (req, res, next) => {
           }
         })
       );
-      res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
+      respondForbidden(req, res, 'Access denied.');
       return;
     }
 
@@ -1007,7 +1026,7 @@ app.use(async (req, res, next) => {
         })
       );
 
-      res.status(403).json({ error: 'forbidden', message: 'Access denied.' });
+      respondForbidden(req, res, 'Access denied.');
       return;
     }
 
@@ -1033,7 +1052,7 @@ app.use(async (req, res, next) => {
           })
         );
 
-        res.status(403).json({ error: 'forbidden', message: 'Bot traffic blocked.' });
+        respondForbidden(req, res, 'Bot traffic blocked.');
         return;
       }
     }
@@ -1054,6 +1073,144 @@ app.use(async (req, res, next) => {
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
+
+app.get('/403', (req, res) => {
+  res
+    .status(403)
+    .setHeader('Content-Type', 'text/html; charset=utf-8')
+    .send(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>403 - Access Denied</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #111;
+        color: #f4f4f4;
+        font-family: Tahoma, 'Segoe UI', sans-serif;
+      }
+      .card {
+        width: min(460px, 92vw);
+        background: #1c1c1c;
+        border: 1px solid #444;
+        padding: 18px;
+      }
+      h1 {
+        margin: 0 0 8px;
+        font-size: 20px;
+      }
+      p {
+        margin: 0 0 10px;
+        color: #d0d0d0;
+      }
+      label {
+        display: block;
+        font-size: 12px;
+        margin-bottom: 4px;
+      }
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 8px;
+        margin-bottom: 10px;
+        border: 1px solid #666;
+        background: #0f0f0f;
+        color: #f4f4f4;
+      }
+      button {
+        padding: 8px 12px;
+        border: 1px solid #666;
+        background: #2b2b2b;
+        color: #fff;
+        cursor: pointer;
+      }
+      #status {
+        min-height: 18px;
+        margin-top: 8px;
+        font-size: 12px;
+        color: #ffb3b3;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="card">
+      <h1>403 - Access Denied</h1>
+      <p>This IP is currently blocked.</p>
+      <form id="unlock-form">
+        <label for="admin-password">Enter pass if admin</label>
+        <input id="admin-password" name="password" type="password" autocomplete="off" required />
+        <button type="submit">Unlock</button>
+      </form>
+      <p id="status" role="alert" aria-live="polite"></p>
+    </main>
+    <script>
+      const form = document.getElementById('unlock-form');
+      const passwordInput = document.getElementById('admin-password');
+      const status = document.getElementById('status');
+
+      form.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        status.textContent = '';
+        const password = passwordInput.value;
+        if (!password) {
+          status.textContent = 'Password required.';
+          return;
+        }
+
+        try {
+          const response = await fetch('/forbidden-admin-unlock', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password })
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            status.textContent = payload.message || 'Invalid password.';
+            return;
+          }
+          window.location.href = '/';
+        } catch (error) {
+          status.textContent = 'Unlock request failed.';
+        }
+      });
+    </script>
+  </body>
+</html>`);
+});
+
+app.post('/forbidden-admin-unlock', async (req, res, next) => {
+  const providedPassword = String(req.body?.password || '');
+  if (providedPassword !== ADMIN_DASHBOARD_PASSWORD) {
+    res.status(401).json({ error: 'unauthorized', message: 'Invalid admin password.' });
+    return;
+  }
+
+  try {
+    const clientIp = getClientIp(req);
+    await redisPublisher.del(blockedIpKey(clientIp));
+    await redisPublisher.del(botStrikeKey(clientIp));
+
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'admin_unblocked_ip',
+        statusCode: 200,
+        meta: {
+          unblockedIp: clientIp,
+          source: 'forbidden_page'
+        }
+      })
+    );
+
+    res.json({ ok: true, ip: clientIp });
+  } catch (error) {
+    next(error);
+  }
+});
 
 async function publishEvent(type, payload) {
   await redisPublisher.publish(
