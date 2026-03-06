@@ -865,6 +865,7 @@ function renderAdminUsernames(usernames) {
   for (const username of usernames) {
     const row = document.createElement('tr');
     const actionDisabled = !username.username_key ? 'disabled' : '';
+    const banDisabled = username.last_ip ? '' : 'disabled';
     const hasIp = Boolean(username.last_ip);
     const isOnline = Boolean(username.is_online);
     const statusClass = isOnline ? 'is-online' : 'is-offline';
@@ -888,6 +889,15 @@ function renderAdminUsernames(usernames) {
           ${actionDisabled}
         >
           Release
+        </button>
+        <button
+          type=\"button\"
+          class=\"admin-release-button\"
+          data-ban-ip-address=\"${escapeHtml(username.last_ip || '')}\"
+          data-ban-ip-username=\"${escapeHtml(username.username_original || username.username_key || 'unknown')}\"
+          ${banDisabled}
+        >
+          Ban IP
         </button>
       </td>
     `;
@@ -1172,6 +1182,50 @@ async function unbanAdminIp(ipAddress) {
     setAdminTab('banned');
   } catch (error) {
     showAdminError(error.message || 'Failed to unban IP.');
+  }
+}
+
+async function banAdminIp(ipAddress, username = '') {
+  const password = state.adminPassword || elements.adminPasswordInput.value;
+  if (!password) {
+    showAdminError('Password required.');
+    return;
+  }
+
+  if (!ipAddress) {
+    showAdminError('Invalid IP address.');
+    return;
+  }
+
+  const target = username || ipAddress;
+  if (!confirm(`Ban IP ${ipAddress} for ${target}?`)) {
+    return;
+  }
+
+  showAdminError('');
+
+  try {
+    const response = await fetch('/api/admin/banned-ips/ban', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-admin-password': password
+      },
+      body: JSON.stringify({
+        ipAddress,
+        reason: 'admin_manual_ban_from_usernames'
+      })
+    });
+
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(payload.message || 'Failed to ban IP.');
+    }
+
+    await loadAdminDashboard(password, { resetEventsPage: false });
+    setAdminTab('usernames');
+  } catch (error) {
+    showAdminError(error.message || 'Failed to ban IP.');
   }
 }
 
@@ -2028,6 +2082,21 @@ elements.adminUsernamesBody.addEventListener('click', async (event) => {
     } finally {
       if (ipButton.isConnected) {
         ipButton.disabled = false;
+      }
+    }
+    return;
+  }
+
+  const banButton = event.target.closest('[data-ban-ip-address]');
+  if (banButton) {
+    const ipAddress = banButton.getAttribute('data-ban-ip-address') || '';
+    const username = banButton.getAttribute('data-ban-ip-username') || '';
+    banButton.disabled = true;
+    try {
+      await banAdminIp(ipAddress, username);
+    } finally {
+      if (banButton.isConnected) {
+        banButton.disabled = false;
       }
     }
     return;

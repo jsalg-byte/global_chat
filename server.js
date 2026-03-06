@@ -588,7 +588,13 @@ function getImmediatePathBanReason(req) {
   if (pathname.includes('/.env')) {
     return 'env_probe';
   }
-  if (pathname === '/wp' || pathname.startsWith('/wp/') || pathname === '/wordpress' || pathname.startsWith('/wordpress/')) {
+  if (
+    pathname === '/wp' ||
+    pathname.startsWith('/wp/') ||
+    pathname.startsWith('/wp-') ||
+    pathname === '/wordpress' ||
+    pathname.startsWith('/wordpress/')
+  ) {
     return 'wp_probe';
   }
   if (pathname.includes('.sh') || pathname.includes('.sql') || pathname.includes('.bak')) {
@@ -616,10 +622,27 @@ function isSuspiciousUserAgent(userAgent) {
     'httpclient',
     'go-http-client',
     'curl/',
-    'wget/'
+    'wget/',
+    '/wp-admin',
+    '/wp-login',
+    '/wordpress',
+    'setup-config.php',
+    '/.env',
+    '.sql',
+    '.bak',
+    '.sh'
   ];
 
-  return patterns.some((pattern) => ua.includes(pattern));
+  if (patterns.some((pattern) => ua.includes(pattern))) {
+    return true;
+  }
+
+  // User-Agent headers that look like raw probe URLs are malicious in this app.
+  if ((ua.includes('http://') || ua.includes('https://')) && (ua.includes('/wp') || ua.includes('/wordpress') || ua.includes('/.env'))) {
+    return true;
+  }
+
+  return false;
 }
 
 async function loadMaxMindReader(dbPath, label) {
@@ -1010,21 +1033,6 @@ app.use(async (req, res, next) => {
       return;
     }
 
-    if (countryCode && COUNTRY_BLOCKLIST.includes(countryCode) && !(isAdminRoute && hasValidAdminPassword) && !isForbiddenRoute) {
-      queueSiteEvent(
-        buildHttpEvent(req, {
-          eventType: 'country_blocked',
-          statusCode: 403,
-          meta: {
-            countryCode,
-            countryBlocklist: COUNTRY_BLOCKLIST
-          }
-        })
-      );
-      respondForbidden(req, res, 'Access denied.');
-      return;
-    }
-
     const immediateBanReason = getImmediatePathBanReason(req);
     if (immediateBanReason) {
       await blockIp(clientIp, HONEYPOT_BLOCK_SECONDS, immediateBanReason);
@@ -1040,6 +1048,21 @@ app.use(async (req, res, next) => {
         })
       );
 
+      respondForbidden(req, res, 'Access denied.');
+      return;
+    }
+
+    if (countryCode && COUNTRY_BLOCKLIST.includes(countryCode) && !(isAdminRoute && hasValidAdminPassword) && !isForbiddenRoute) {
+      queueSiteEvent(
+        buildHttpEvent(req, {
+          eventType: 'country_blocked',
+          statusCode: 403,
+          meta: {
+            countryCode,
+            countryBlocklist: COUNTRY_BLOCKLIST
+          }
+        })
+      );
       respondForbidden(req, res, 'Access denied.');
       return;
     }
@@ -2326,6 +2349,44 @@ app.post('/api/admin/banned-ips/unban', async (req, res, next) => {
     );
 
     res.json({ ok: true, ip: ipAddress });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post('/api/admin/banned-ips/ban', async (req, res, next) => {
+  if (!requireAdminPassword(req, res)) {
+    return;
+  }
+
+  const ipAddress = normalizeIp(req.body?.ipAddress);
+  if (!ipAddress) {
+    res.status(400).json({ error: 'invalid_ip', message: 'Invalid IP address.' });
+    return;
+  }
+
+  const reasonRaw = String(req.body?.reason || '').trim().toLowerCase();
+  const reason = reasonRaw || 'admin_manual_ban';
+  const secondsRaw = Number(req.body?.seconds || HONEYPOT_BLOCK_SECONDS);
+  const seconds = Number.isFinite(secondsRaw) ? Math.max(60, Math.floor(secondsRaw)) : HONEYPOT_BLOCK_SECONDS;
+
+  try {
+    await blockIp(ipAddress, seconds, reason);
+    await redisPublisher.del(botStrikeKey(ipAddress));
+
+    queueSiteEvent(
+      buildHttpEvent(req, {
+        eventType: 'admin_banned_ip',
+        statusCode: 200,
+        meta: {
+          bannedIp: ipAddress,
+          reason,
+          seconds
+        }
+      })
+    );
+
+    res.json({ ok: true, ip: ipAddress, reason, seconds });
   } catch (error) {
     next(error);
   }

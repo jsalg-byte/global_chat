@@ -412,6 +412,10 @@ body {
   min-width: 78px;
 }
 
+.admin-release-button + .admin-release-button {
+  margin-left: 4px;
+}
+
 .admin-delete-channel-button {
   min-width: 78px;
 }
