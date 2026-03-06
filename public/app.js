@@ -993,7 +993,7 @@ function renderAdminBannedIps(bannedIps) {
   for (const entry of state.adminBannedIps) {
     const ipAddress = String(entry.ip_address || '');
     const reason = String(entry.reason || 'blocked');
-    const ttlText = formatDuration(entry.ttl_seconds);
+    const ttlText = entry.ttl_seconds === null || entry.ttl_seconds === undefined ? 'Permanent' : formatDuration(entry.ttl_seconds);
     const buttonDisabled = ipAddress ? '' : 'disabled';
     const row = document.createElement('tr');
 

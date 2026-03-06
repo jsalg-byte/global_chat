@@ -724,14 +724,27 @@ async function blockIp(ipAddress, seconds, reason) {
   if (!ipAddress || ipAddress === 'unknown') {
     return;
   }
-  const safeSeconds = Number.isFinite(Number(seconds)) ? Math.max(60, Math.floor(Number(seconds))) : HONEYPOT_BLOCK_SECONDS;
   const safeReason = String(reason || 'blocked').trim() || 'blocked';
+  const secondsValue = Number(seconds);
+  const isPermanent = !Number.isFinite(secondsValue) || secondsValue <= 0;
+  const safeSeconds = isPermanent ? null : Math.max(60, Math.floor(secondsValue));
 
-  await redisPublisher.set(blockedIpKey(ipAddress), safeReason, { EX: safeSeconds });
+  if (safeSeconds === null) {
+    await redisPublisher.set(blockedIpKey(ipAddress), safeReason);
+  } else {
+    await redisPublisher.set(blockedIpKey(ipAddress), safeReason, { EX: safeSeconds });
+  }
+
   await pool.query(
     `
       INSERT INTO banned_ips (ip_address, reason, banned_at, expires_at, unbanned_at)
-      VALUES ($1, $2, NOW(), NOW() + ($3 * INTERVAL '1 second'), NULL)
+      VALUES (
+        $1,
+        $2,
+        NOW(),
+        CASE WHEN $3::int IS NULL THEN NULL ELSE NOW() + ($3 * INTERVAL '1 second') END,
+        NULL
+      )
       ON CONFLICT (ip_address)
       DO UPDATE SET
         reason = EXCLUDED.reason,
@@ -772,11 +785,16 @@ async function isIpBlocked(ipAddress) {
 
   const result = await pool.query(
     `
-      SELECT reason, GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (expires_at - NOW()))))::int AS ttl_seconds
+      SELECT
+        reason,
+        CASE
+          WHEN expires_at IS NULL THEN NULL
+          ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (expires_at - NOW()))))::int
+        END AS ttl_seconds
       FROM banned_ips
       WHERE ip_address = $1
         AND unbanned_at IS NULL
-        AND expires_at > NOW()
+        AND (expires_at IS NULL OR expires_at > NOW())
       LIMIT 1
     `,
     [ipAddress]
@@ -787,9 +805,12 @@ async function isIpBlocked(ipAddress) {
   }
 
   const row = result.rows[0];
-  const ttlSeconds = Number(row.ttl_seconds || 0);
-  if (ttlSeconds > 0) {
-    await redisPublisher.set(blockedIpKey(ipAddress), String(row.reason || 'blocked'), { EX: ttlSeconds });
+  const reason = String(row.reason || 'blocked');
+  const ttlSeconds = row.ttl_seconds === null ? null : Number(row.ttl_seconds || 0);
+  if (ttlSeconds === null) {
+    await redisPublisher.set(blockedIpKey(ipAddress), reason);
+  } else if (ttlSeconds > 0) {
+    await redisPublisher.set(blockedIpKey(ipAddress), reason, { EX: ttlSeconds });
   }
   return true;
 }
@@ -801,11 +822,14 @@ async function listBlockedIps(limit = 500) {
       SELECT
         ip_address,
         reason,
-        GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (expires_at - NOW()))))::int AS ttl_seconds
+        CASE
+          WHEN expires_at IS NULL THEN NULL
+          ELSE GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (expires_at - NOW()))))::int
+        END AS ttl_seconds
       FROM banned_ips
       WHERE unbanned_at IS NULL
-        AND expires_at > NOW()
-      ORDER BY expires_at ASC
+        AND (expires_at IS NULL OR expires_at > NOW())
+      ORDER BY expires_at ASC NULLS FIRST
       LIMIT $1
     `,
     [max]
@@ -850,27 +874,40 @@ async function syncRedisBansToDatabase(limit = 5000) {
     const ipAddress = normalizeIp(key.slice(prefix.length));
     const reason = String(results?.[index * 2] || 'blocked');
     const ttlRaw = Number(results?.[index * 2 + 1]);
-    if (!ipAddress || !Number.isFinite(ttlRaw) || ttlRaw <= 0) {
+    if (!ipAddress || !Number.isFinite(ttlRaw) || ttlRaw === -2) {
       continue;
     }
+    const reasonText = String(reason || 'blocked');
+    const importedSeconds = null;
 
     await pool.query(
       `
         INSERT INTO banned_ips (ip_address, reason, banned_at, expires_at, unbanned_at)
-        VALUES ($1, $2, NOW(), NOW() + ($3 * INTERVAL '1 second'), NULL)
+        VALUES (
+          $1,
+          $2,
+          NOW(),
+          CASE WHEN $3::int IS NULL THEN NULL ELSE NOW() + ($3 * INTERVAL '1 second') END,
+          NULL
+        )
         ON CONFLICT (ip_address)
         DO UPDATE SET
           reason = EXCLUDED.reason,
           banned_at = CASE
-            WHEN banned_ips.unbanned_at IS NULL AND banned_ips.expires_at > NOW()
+            WHEN banned_ips.unbanned_at IS NULL AND (banned_ips.expires_at IS NULL OR banned_ips.expires_at > NOW())
               THEN banned_ips.banned_at
             ELSE NOW()
           END,
-          expires_at = GREATEST(banned_ips.expires_at, EXCLUDED.expires_at),
+          expires_at = CASE
+            WHEN banned_ips.expires_at IS NULL OR EXCLUDED.expires_at IS NULL THEN NULL
+            ELSE GREATEST(banned_ips.expires_at, EXCLUDED.expires_at)
+          END,
           unbanned_at = NULL
       `,
-      [ipAddress, reason, ttlRaw]
+      [ipAddress, reasonText, importedSeconds]
     );
+
+    await redisPublisher.set(blockedIpKey(ipAddress), reasonText);
   }
 }
 
@@ -1125,7 +1162,7 @@ app.use(async (req, res, next) => {
 
     const immediateBanReason = getImmediatePathBanReason(req);
     if (immediateBanReason) {
-      await blockIp(clientIp, HONEYPOT_BLOCK_SECONDS, immediateBanReason);
+      await blockIp(clientIp, null, immediateBanReason);
 
       queueSiteEvent(
         buildHttpEvent(req, {
@@ -1165,7 +1202,7 @@ app.use(async (req, res, next) => {
       await redisPublisher.expire(botStrikeKey(clientIp), 86400, 'NX');
 
       if (suspiciousPath || strikes >= 2) {
-        await blockIp(clientIp, HONEYPOT_BLOCK_SECONDS, 'bot_filtered');
+        await blockIp(clientIp, null, 'bot_filtered');
 
         queueSiteEvent(
           buildHttpEvent(req, {
@@ -1573,7 +1610,7 @@ app.post('/api/claim', async (req, res, next) => {
   const clientIp = getClientIp(req);
 
   if (hasHoneypotPayload(req)) {
-    await blockIp(clientIp, HONEYPOT_BLOCK_SECONDS, 'honeypot_payload').catch(() => {});
+    await blockIp(clientIp, null, 'honeypot_payload').catch(() => {});
 
     queueSiteEvent(
       buildHttpEvent(req, {
@@ -2457,11 +2494,9 @@ app.post('/api/admin/banned-ips/ban', async (req, res, next) => {
 
   const reasonRaw = String(req.body?.reason || '').trim().toLowerCase();
   const reason = reasonRaw || 'admin_manual_ban';
-  const secondsRaw = Number(req.body?.seconds || HONEYPOT_BLOCK_SECONDS);
-  const seconds = Number.isFinite(secondsRaw) ? Math.max(60, Math.floor(secondsRaw)) : HONEYPOT_BLOCK_SECONDS;
 
   try {
-    await blockIp(ipAddress, seconds, reason);
+    await blockIp(ipAddress, null, reason);
     await redisPublisher.del(botStrikeKey(ipAddress));
 
     queueSiteEvent(
@@ -2471,12 +2506,12 @@ app.post('/api/admin/banned-ips/ban', async (req, res, next) => {
         meta: {
           bannedIp: ipAddress,
           reason,
-          seconds
+          permanent: true
         }
       })
     );
 
-    res.json({ ok: true, ip: ipAddress, reason, seconds });
+    res.json({ ok: true, ip: ipAddress, reason, permanent: true });
   } catch (error) {
     next(error);
   }
@@ -2675,7 +2710,7 @@ app.post('/api/admin/unblock-me', async (req, res, next) => {
 app.all('/__trap__', async (req, res, next) => {
   try {
     const clientIp = getClientIp(req);
-    await blockIp(clientIp, HONEYPOT_BLOCK_SECONDS, 'honeypot_triggered');
+    await blockIp(clientIp, null, 'honeypot_triggered');
 
     queueSiteEvent(
       buildHttpEvent(req, {
@@ -3056,9 +3091,20 @@ async function initDatabase() {
       ip_address TEXT PRIMARY KEY,
       reason TEXT NOT NULL DEFAULT 'blocked',
       banned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-      expires_at TIMESTAMPTZ NOT NULL,
+      expires_at TIMESTAMPTZ,
       unbanned_at TIMESTAMPTZ
     );
+  `);
+
+  await pool.query(`
+    ALTER TABLE banned_ips
+    ALTER COLUMN expires_at DROP NOT NULL;
+  `);
+
+  await pool.query(`
+    UPDATE banned_ips
+    SET expires_at = NULL
+    WHERE unbanned_at IS NULL;
   `);
 
   await ensureUserColors();
