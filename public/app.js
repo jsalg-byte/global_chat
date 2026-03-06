@@ -1223,7 +1223,8 @@ async function banAdminIp(ipAddress, username = '') {
     }
 
     await loadAdminDashboard(password, { resetEventsPage: false });
-    setAdminTab('usernames');
+    setAdminTab('banned');
+    showAdminError(`Banned IP: ${payload.ip || ipAddress}`);
   } catch (error) {
     showAdminError(error.message || 'Failed to ban IP.');
   }
