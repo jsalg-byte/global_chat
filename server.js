@@ -724,19 +724,102 @@ async function blockIp(ipAddress, seconds, reason) {
   if (!ipAddress || ipAddress === 'unknown') {
     return;
   }
-  await redisPublisher.set(blockedIpKey(ipAddress), reason || 'blocked', { EX: seconds });
+  const safeSeconds = Number.isFinite(Number(seconds)) ? Math.max(60, Math.floor(Number(seconds))) : HONEYPOT_BLOCK_SECONDS;
+  const safeReason = String(reason || 'blocked').trim() || 'blocked';
+
+  await redisPublisher.set(blockedIpKey(ipAddress), safeReason, { EX: safeSeconds });
+  await pool.query(
+    `
+      INSERT INTO banned_ips (ip_address, reason, banned_at, expires_at, unbanned_at)
+      VALUES ($1, $2, NOW(), NOW() + ($3 * INTERVAL '1 second'), NULL)
+      ON CONFLICT (ip_address)
+      DO UPDATE SET
+        reason = EXCLUDED.reason,
+        banned_at = EXCLUDED.banned_at,
+        expires_at = EXCLUDED.expires_at,
+        unbanned_at = NULL
+    `,
+    [ipAddress, safeReason, safeSeconds]
+  );
+}
+
+async function unblockIp(ipAddress) {
+  if (!ipAddress || ipAddress === 'unknown') {
+    return;
+  }
+
+  await redisPublisher.del(blockedIpKey(ipAddress));
+  await pool.query(
+    `
+      UPDATE banned_ips
+      SET unbanned_at = NOW()
+      WHERE ip_address = $1
+        AND unbanned_at IS NULL
+    `,
+    [ipAddress]
+  );
 }
 
 async function isIpBlocked(ipAddress) {
   if (!ipAddress || ipAddress === 'unknown') {
     return false;
   }
-  const value = await redisPublisher.get(blockedIpKey(ipAddress));
-  return Boolean(value);
+
+  const redisReason = await redisPublisher.get(blockedIpKey(ipAddress));
+  if (redisReason) {
+    return true;
+  }
+
+  const result = await pool.query(
+    `
+      SELECT reason, GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (expires_at - NOW()))))::int AS ttl_seconds
+      FROM banned_ips
+      WHERE ip_address = $1
+        AND unbanned_at IS NULL
+        AND expires_at > NOW()
+      LIMIT 1
+    `,
+    [ipAddress]
+  );
+
+  if (result.rowCount === 0) {
+    return false;
+  }
+
+  const row = result.rows[0];
+  const ttlSeconds = Number(row.ttl_seconds || 0);
+  if (ttlSeconds > 0) {
+    await redisPublisher.set(blockedIpKey(ipAddress), String(row.reason || 'blocked'), { EX: ttlSeconds });
+  }
+  return true;
 }
 
 async function listBlockedIps(limit = 500) {
   const max = Number.isFinite(limit) ? Math.max(1, Math.min(5000, Math.floor(limit))) : 500;
+  const result = await pool.query(
+    `
+      SELECT
+        ip_address,
+        reason,
+        GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (expires_at - NOW()))))::int AS ttl_seconds
+      FROM banned_ips
+      WHERE unbanned_at IS NULL
+        AND expires_at > NOW()
+      ORDER BY expires_at ASC
+      LIMIT $1
+    `,
+    [max]
+  );
+
+  return result.rows.map((row) => ({
+    ip_address: row.ip_address,
+    reason: row.reason || 'blocked',
+    ttl_seconds: Number.isFinite(Number(row.ttl_seconds)) ? Number(row.ttl_seconds) : null
+  }));
+}
+
+async function syncRedisBansToDatabase(limit = 5000) {
+  const max = Number.isFinite(limit) ? Math.max(1, Math.min(10000, Math.floor(limit))) : 5000;
   const prefix = `${REDIS_PREFIX}:blocked_ip:`;
   const keys = [];
 
@@ -748,7 +831,7 @@ async function listBlockedIps(limit = 500) {
   }
 
   if (!keys.length) {
-    return [];
+    return;
   }
 
   const pipeline = redisPublisher.multi();
@@ -758,30 +841,37 @@ async function listBlockedIps(limit = 500) {
   }
   const results = await pipeline.exec();
 
-  const entries = [];
   for (let index = 0; index < keys.length; index += 1) {
     const key = keys[index];
-    const reason = results?.[index * 2] ?? null;
-    const ttlRaw = Number(results?.[index * 2 + 1]);
-
-    if (!key.startsWith(prefix) || ttlRaw === -2) {
+    if (!key.startsWith(prefix)) {
       continue;
     }
 
-    entries.push({
-      ip_address: key.slice(prefix.length),
-      reason: reason ? String(reason) : 'blocked',
-      ttl_seconds: Number.isFinite(ttlRaw) && ttlRaw >= 0 ? ttlRaw : null
-    });
+    const ipAddress = normalizeIp(key.slice(prefix.length));
+    const reason = String(results?.[index * 2] || 'blocked');
+    const ttlRaw = Number(results?.[index * 2 + 1]);
+    if (!ipAddress || !Number.isFinite(ttlRaw) || ttlRaw <= 0) {
+      continue;
+    }
+
+    await pool.query(
+      `
+        INSERT INTO banned_ips (ip_address, reason, banned_at, expires_at, unbanned_at)
+        VALUES ($1, $2, NOW(), NOW() + ($3 * INTERVAL '1 second'), NULL)
+        ON CONFLICT (ip_address)
+        DO UPDATE SET
+          reason = EXCLUDED.reason,
+          banned_at = CASE
+            WHEN banned_ips.unbanned_at IS NULL AND banned_ips.expires_at > NOW()
+              THEN banned_ips.banned_at
+            ELSE NOW()
+          END,
+          expires_at = GREATEST(banned_ips.expires_at, EXCLUDED.expires_at),
+          unbanned_at = NULL
+      `,
+      [ipAddress, reason, ttlRaw]
+    );
   }
-
-  entries.sort((a, b) => {
-    const aTtl = a.ttl_seconds === null ? Number.MAX_SAFE_INTEGER : a.ttl_seconds;
-    const bTtl = b.ttl_seconds === null ? Number.MAX_SAFE_INTEGER : b.ttl_seconds;
-    return aTtl - bTtl;
-  });
-
-  return entries;
 }
 
 function sanitizeHeaders(headers) {
@@ -1229,7 +1319,7 @@ app.post('/forbidden-admin-unlock', async (req, res, next) => {
 
   try {
     const clientIp = getClientIp(req);
-    await redisPublisher.del(blockedIpKey(clientIp));
+    await unblockIp(clientIp);
     await redisPublisher.del(botStrikeKey(clientIp));
 
     queueSiteEvent(
@@ -2334,7 +2424,7 @@ app.post('/api/admin/banned-ips/unban', async (req, res, next) => {
   }
 
   try {
-    await redisPublisher.del(blockedIpKey(ipAddress));
+    await unblockIp(ipAddress);
     await redisPublisher.del(botStrikeKey(ipAddress));
 
     queueSiteEvent(
@@ -2563,7 +2653,7 @@ app.post('/api/admin/unblock-me', async (req, res, next) => {
 
   try {
     const clientIp = getClientIp(req);
-    await redisPublisher.del(blockedIpKey(clientIp));
+    await unblockIp(clientIp);
     await redisPublisher.del(botStrikeKey(clientIp));
 
     queueSiteEvent(
@@ -2961,7 +3051,18 @@ async function initDatabase() {
     );
   `);
 
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS banned_ips (
+      ip_address TEXT PRIMARY KEY,
+      reason TEXT NOT NULL DEFAULT 'blocked',
+      banned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      unbanned_at TIMESTAMPTZ
+    );
+  `);
+
   await ensureUserColors();
+  await syncRedisBansToDatabase();
 
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_messages_channel_created_at
@@ -2981,6 +3082,12 @@ async function initDatabase() {
   await pool.query(`
     CREATE INDEX IF NOT EXISTS idx_site_events_username_key_time
     ON site_events(username_key, event_time DESC);
+  `);
+
+  await pool.query(`
+    CREATE INDEX IF NOT EXISTS idx_banned_ips_active_expires
+    ON banned_ips(expires_at)
+    WHERE unbanned_at IS NULL;
   `);
 
   await pool.query(
